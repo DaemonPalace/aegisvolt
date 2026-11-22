@@ -1,7 +1,7 @@
 .terraform/
 *.tfstate
 *.tfstate.*
-tfplan
+*tfplan
 *_override.tf
 .env
 __pycache__/

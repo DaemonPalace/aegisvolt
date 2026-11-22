@@ -1,0 +1,30 @@
+{
+  "stations": [
+    { "id": "BOG-01", "name": "Bogotá Norte", "city": "Bogotá" },
+    { "id": "MDE-01", "name": "El Poblado", "city": "Medellín" },
+    { "id": "CDMX-01", "name": "Vallejo", "city": "Ciudad de México" }
+  ],
+  "connectors": [
+    { "suffix": "C1", "type": "FAST", "power_kw": 150 },
+    { "suffix": "C2", "type": "FAST", "power_kw": 150 },
+    { "suffix": "C3", "type": "ULTRA", "power_kw": 350 }
+  ],
+  "fleets": [
+    { "id": "FLEET-ACME", "balance_cents": 50000 },
+    { "id": "FLEET-LOWFUNDS", "balance_cents": 500 }
+  ],
+  "flags": {
+    "ENABLE_DYNAMIC_SURGE_PRICING": {
+      "description": "Surge pricing x1.5 (simulated peak hours)",
+      "dev": true, "test": true, "prod": false
+    },
+    "ENABLE_FAST_CHARGE_BOOST": {
+      "description": "Allow priority reservation of ULTRA (350 kW) connectors",
+      "dev": true, "test": false, "prod": false
+    },
+    "SIMULATE_CHARGER_HARDWARE_FAULT": {
+      "description": "Fault injection: energy-dispatch activation fails, SAGA compensates",
+      "dev": false, "test": false, "prod": false
+    }
+  }
+}
