@@ -327,8 +327,8 @@ type Mutation {
     - No role gets AdministratorAccess.
     - Humans use the IAM user `AegisVOlt-manager` (CLI profile `aegisvolt`) with the customer-managed policy `exam-aegisvolt-operator` (`bootstrap/operator-policy.json`). Root is never used.
     - Every `aegisvolt-*` role, Terraform-created or not, **must** set `permissions_boundary = arn:aws:iam::272973566676:policy/exam-aegisvolt-boundary` (`bootstrap/boundary-policy.json`). The operator policy denies creating a role or attaching a policy without it. The boundary's name sits outside `aegisvolt-*`, so neither humans nor CI can edit it. Together these block privilege escalation through a role we create.
-  - **`aegisvolt-gha-plan`**: trust `repo:DaemonPalace/aegisvolt:pull_request`. Permissions: `ReadOnlyAccess`, plus read/write on the state bucket (plan needs the lockfile).
-  - **`aegisvolt-gha-deploy`**: trust only `repo:DaemonPalace/aegisvolt:ref:refs/heads/{dev,test,prod}`. Permissions are an inline policy:
+  - **`aegisvolt-gha-plan`**: trust `repo:DaemonPalace@176678192/aegisvolt@1467661995:pull_request` (the repo uses GitHub's immutable OIDC subject, with numeric owner and repo IDs). Permissions: `ReadOnlyAccess`, plus read/write on the state bucket (plan needs the lockfile).
+  - **`aegisvolt-gha-deploy`**: trust only `repo:DaemonPalace@176678192/aegisvolt@1467661995:ref:refs/heads/{dev,test,prod}`. Permissions are an inline policy:
     - ec2, elasticloadbalancing, apigateway, logs, cloudwatch, ssm: full access to those service APIs. The account has no other EC2/VPC/API Gateway REST workloads besides the default VPC.
     - dynamodb: `arn:…:table/aegisvolt-*` only.
     - s3: `aegisvolt-*` buckets only.
