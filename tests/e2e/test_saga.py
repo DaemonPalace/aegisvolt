@@ -11,13 +11,13 @@ def compensations(saga: dict) -> list[str]:
 
 
 @pytest.mark.parametrize("name, fleet, station, cid, kwh, flags, status, undo", [
-    ("happy path", "FLEET-ACME", "BOG-01", "BOG-01-C1", 10, {}, "COMPLETED", []),
+    ("happy path", "FLEET-ANDINA", "BOG-01", "BOG-01-C1", 10, {}, "COMPLETED", []),
     ("insufficient funds", "FLEET-LOWFUNDS", "BOG-01", "BOG-01-C2", 20, {}, "COMPENSATED", ["reserve"]),
-    ("hardware fault", "FLEET-ACME", "MDE-01", "MDE-01-C1", 10, {"SIMULATE_CHARGER_HARDWARE_FAULT": True},
+    ("hardware fault", "FLEET-ANDINA", "MDE-01", "MDE-01-C1", 10, {"SIMULATE_CHARGER_HARDWARE_FAULT": True},
      "COMPENSATED", ["charge", "reserve"]),
-    ("ULTRA with boost off", "FLEET-ACME", "MDE-01", "MDE-01-C3", 5, {"ENABLE_FAST_CHARGE_BOOST": False},
+    ("ULTRA with boost off", "FLEET-ANDINA", "MDE-01", "MDE-01-C3", 5, {"ENABLE_FAST_CHARGE_BOOST": False},
      "FAILED", []),
-    ("ULTRA with boost on", "FLEET-ACME", "MDE-01", "MDE-01-C3", 5, {"ENABLE_FAST_CHARGE_BOOST": True},
+    ("ULTRA with boost on", "FLEET-ANDINA", "MDE-01", "MDE-01-C3", 5, {"ENABLE_FAST_CHARGE_BOOST": True},
      "COMPLETED", []),
 ])
 def test_scenario(flag, name, fleet, station, cid, kwh, flags, status, undo):
@@ -44,10 +44,10 @@ def test_scenario(flag, name, fleet, station, cid, kwh, flags, status, undo):
 
 def test_idempotent_replay_starts_one_saga_and_charges_once():
     key = str(uuid.uuid4())
-    first = start("FLEET-ACME", "CDMX-01", "CDMX-01-C1", 2, key)
-    again = start("FLEET-ACME", "CDMX-01", "CDMX-01-C1", 2, key)
+    first = start("FLEET-ANDINA", "CDMX-01", "CDMX-01-C1", 2, key)
+    again = start("FLEET-ANDINA", "CDMX-01", "CDMX-01-C1", 2, key)
     assert first["id"] == again["id"] == key
     saga = wait(key)
     assert saga["status"] == "COMPLETED"
-    assert [t["kind"] for t in wallet("FLEET-ACME")["transactions"] if t["sagaId"] == key] == ["CHARGE"]
+    assert [t["kind"] for t in wallet("FLEET-ANDINA")["transactions"] if t["sagaId"] == key] == ["CHARGE"]
     stop(key)

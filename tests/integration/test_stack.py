@@ -20,7 +20,7 @@ def test_seed_is_loaded():
 
 def test_three_parallel_charges_on_one_connector_exactly_one_wins():
     with ThreadPoolExecutor(3) as pool:
-        ids = [s["id"] for s in pool.map(lambda _: start("FLEET-ACME", "CDMX-01", "CDMX-01-C2", 1), range(3))]
+        ids = [s["id"] for s in pool.map(lambda _: start("FLEET-ANDINA", "CDMX-01", "CDMX-01-C2", 1), range(3))]
     final = [wait(i) for i in ids]
     assert sorted(s["status"] for s in final) == ["COMPLETED", "FAILED", "FAILED"], final
     winner = next(s for s in final if s["status"] == "COMPLETED")

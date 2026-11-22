@@ -9,3 +9,7 @@ __pycache__/
 .venv/
 node_modules/
 dist/
+.taste-skill/
+frontend/out/
+frontend/.next/
+frontend/tsconfig.tsbuildinfo
