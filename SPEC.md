@@ -22,14 +22,16 @@ aegisvolt/
 │   └── modules/{network,data,k3s,apigw,observability}/   # web hosting decided in S5
 ├── seed/seed.json             # stations, connectors, fleets, flag defaults (used by TF AND local seed)
 ├── services/
-│   ├── common/                # web.py (app factory), log.py, flags.py, ddb.py, delay.py (copied into each image)
-│   ├── gateway/               # app.py + schema.py (Strawberry GraphQL) + saga.py (SAGA orchestrator)
+│   ├── common/                # web.py (app factory), log.py (JSON + watchtower), ddb.py (tables, flags, txn helpers)
+│   ├── gateway/               # app.py + schema.py (Strawberry GraphQL) + saga.py (SAGA orchestrator) + schema.graphql (export)
 │   ├── reservation/  billing/  dispatch/   # FastAPI
+│   ├── Dockerfile             # one recipe, --build-arg SERVICE=<dir>
+│   ├── test_unit.py           # unit tests: all services in-process on moto
 │   └── requirements.txt       # single shared requirements file
 ├── k8s/                       # manifests rendered with envsubst
 ├── frontend/                  # Next.js 16 static export (output: "export")
 ├── prefect/flows.py
-├── tests/{integration,e2e}/   # unit tests live next to each service
+├── tests/{integration,e2e}/   # GraphQL tests against a running stack (API_URL)
 ├── scripts/                   # protect-branches.sh deploy.sh canary.sh seed_local.py prefect_report.py demo.sh
 ├── docker-compose.yml
 └── .github/workflows/{pr.yml,deploy.yml}
@@ -52,7 +54,7 @@ Connector ids: `<station>-C1` and `<station>-C2` are FAST, `<station>-C3` is ULT
 | fleetId | initial balance (cents) | purpose |
 |---|---|---|
 | `FLEET-ACME` | 50000 | happy path |
-| `FLEET-LOWFUNDS` | 500 | step-2 failure demo |
+| `FLEET-LOWFUNDS` | 500 | step-2 failure demo (use kwh ≥ 14: 20 kWh with surge = 750 cents) |
 
 **Pricing**: base rate is 25 cents/kWh. Surge multiplier is ×1.5. `amount = ceil(kwh × 25 × multiplier)`.
 
@@ -73,7 +75,7 @@ There is one table per env: `aegisvolt-flags-<env>`. Terraform seeds the rows wi
 | Table (`-<env>`) | Owner | Items |
 |---|---|---|
 | `aegisvolt-reservations` | reservation | connector `pk=STATION#<id>`, `sk=CONNECTOR#<cid>` {type, power_kw, status `AVAILABLE`/`RESERVED`, saga_id, updated_at}; station meta `sk=META` {name, city}; idempotency marker `pk=SAGA#<sagaId>`, `sk=RESERVE`/`RELEASE` {result} |
-| `aegisvolt-billing` | billing | wallet `pk=FLEET#<id>`, `sk=WALLET` {balance_cents}; txn `pk=FLEET#<id>`, `sk=TXN#<sagaId>#CHARGE`/`REFUND`/`TOPUP#<ts>` {amount_cents, surge, created_at} |
+| `aegisvolt-billing` | billing | wallet `pk=FLEET#<id>`, `sk=WALLET` {balance_cents}; txn `pk=FLEET#<id>`, `sk=TXN#<sagaId>#CHARGE`/`TXN#<sagaId>#REFUND`/`TXN#TOPUP#<ts>` {amount_cents, surge, created_at} |
 | `aegisvolt-dispatch` | dispatch | session `pk=SESSION#<sagaId>`, `sk=META` {status `ACTIVE`/`FAILED`/`STOPPED`, station_id, connector_id, kwh}; telemetry `pk=STATION#<id>`, `sk=TELEMETRY#<ts>` {saga_id, connector_id, power_kw, energy_kwh, voltage} |
 | `aegisvolt-sagas` | gateway | `pk=SAGA#<id>`, `sk=META` {status, fleet_id, station_id, connector_id, kwh, amount_cents, created_at, updated_at, steps: list of {name, status, at, detail}} |
 | `aegisvolt-flags` | gateway (write) / all (read) | key `name` (S) only {enabled (BOOL), description, updated_at} |
@@ -131,11 +133,11 @@ stopCharge(sagaId) ─► dispatch /stop ─► reservation /release ─► STOP
 ```
 
 - **Saga statuses**: `STARTED`, `COMPLETED`, `FAILED`, `COMPENSATED`, `COMPENSATION_FAILED`, `STOPPED`.
-- **Step statuses**: `OK`, `FAILED`, `COMPENSATED`.
+- **Step statuses**: `OK`, `FAILED`, `COMPENSATED`. A compensation entry carries the *forward* step's name (`charge` + `COMPENSATED` = refund), so the compensation order reads directly from `steps`.
 - Each step appends `{name, status, at, detail}` to `steps`, and the saga row is updated after every step. The UI history panel and Prefect audit read from this row.
 - **Retry policy** (carried over from wandersync ADR-05 and ADR-06):
-  - Forward steps are retried once on a 5xx or a transport error. A 4xx is a business rejection and is not retried.
-  - A timeout (`SAGA_CLIENT_TIMEOUT_SECONDS`) is treated as a failure, because the outcome is unknown, so it is compensated too. Compensations are idempotent, so this is safe.
+  - Forward steps are retried once on a 5xx or a transport error. A 4xx is a business rejection and is not retried. A rejected step did not happen, so only the steps before it are compensated (step 1 rejected → `FAILED`).
+  - A timeout (`SAGA_CLIENT_TIMEOUT_SECONDS`) is treated as a failure, because the outcome is unknown, so **the timed-out step is compensated too** (activate → dispatch `/stop`). Compensations are idempotent and tombstone-safe (a release/stop that lands before its forward call makes the late forward call refuse: 410/409), so this is safe.
   - Compensations are retried up to 5 times, with backoff 1/2/4/8/16 s. If they are still failing, the status becomes `COMPENSATION_FAILED`, and Prefect flags the saga as an orphan.
 - **Crash recovery**: at gateway startup, sagas still `STARTED` after 60 s are compensated (ported from wandersync's `orders-billing/app.py` recovery).
 - **Idempotency**:
@@ -226,9 +228,9 @@ type Mutation {
 
 | ws | VPC CIDR | instance |
 |---|---|---|
-| dev | 10.10.0.0/16 | t3.medium |
-| test | 10.20.0.0/16 | t3.medium |
-| prod | 10.30.0.0/16 | t3.medium |
+| dev | 10.10.0.0/16 | m7i-flex.large |
+| test | 10.20.0.0/16 | m7i-flex.large |
+| prod | 10.30.0.0/16 | m7i-flex.large |
 
 **Modules**:
 - **network**:
@@ -241,7 +243,7 @@ type Mutation {
     - `node-sg`: ingress 30080 only from the private subnet CIDRs, where the NLB lives; no SSH.
 - **data**: the 5 tables plus seed items from `seed/seed.json` and the per-env flag defaults.
 - **k3s**:
-  - EC2 `t3.medium` running AL2023 in the private subnet.
+  - EC2 `m7i-flex.large` (the account's Free plan only allows free-tier types) running AL2023 in the private subnet.
   - IMDSv2 required with `http_put_response_hop_limit = 2`, so pods can use the instance role.
   - `user_data` installs k3s and creates namespace `aegisvolt` and Secret `aegisvolt-secrets` (ADMIN_TOKEN).
   - Instance role with these policies: SSM managed core, DynamoDB on `aegisvolt-*-<env>`, CloudWatch Logs on `/aegisvolt/<env>/*`.
@@ -385,7 +387,7 @@ type Mutation {
 
 ## 14. Local development
 
-- The compose file is based on wandersync's `x-service` anchor (shared network, env, restart policy, health check, ports bound to 127.0.0.1). `docker compose up` starts `dynamodb-local`, a `seed` one-shot container (`scripts/seed_local.py` creates the tables and loads `seed/seed.json` with dev flag defaults), the 4 services, and the frontend dev server.
+- The compose file is based on wandersync's `x-service` anchor (shared network, env, restart policy, health check, ports bound to 127.0.0.1). `docker compose up` starts `dynamodb-local`, a `seed` one-shot container (`scripts/seed_local.py` creates the `aegisvolt-*-local` tables and loads `seed/seed.json` with dev flag defaults), and the 4 services. Admin token locally: `local-admin`. The frontend dev server joins in S5.
 - The gateway listens on `localhost:8080/graphql` and the UI (`next dev`) on `localhost:3000`.
 
 ## 15. Stage acceptance criteria (review gates)
@@ -424,15 +426,15 @@ Abbreviations: **W** = `../wandersync`, **T** = `../Taller-PatronSaga`, **G** = 
 | T `services/account-service/app/core.py` | `services/billing/app.py` | Postgres ledger + idempotency records → one `TransactWriteItems` (§5) |
 | W `services/gateway/app.py` | `services/gateway/app.py` | Keep the Strawberry `GraphQLRouter`, `MaxAliasesLimiter`, CORS and security headers. Sessions removed; `X-Admin-Token` added for admin mutations |
 | W `services/gateway/schema.py`, G `backend/schema.graphql` | `services/gateway/schema.py` | Keep the enum, type and `userErrors` payload shapes; the domain comes from §7 |
-| T `shared/delay.py` | `services/common/delay.py` | Copied as-is |
-| W `services/*/Dockerfile` | `services/*/Dockerfile` | Copied (python:3.12-slim, non-root uid 10001). A single pinned `services/requirements.txt`: fastapi 0.143.0, strawberry-graphql 0.332.1, uvicorn 0.54.0, pydantic 2.14.0, httpx 0.28.1, python-json-logger 4.2.0, boto3, watchtower |
+| T `shared/delay.py` | — | Not needed: the orchestrator sleeps `SAGA_STEP_DELAY_SECONDS` between steps |
+| W `services/*/Dockerfile` | `services/Dockerfile` | One recipe with `ARG SERVICE` (python:3.12-slim, non-root uid 10001). A single pinned `services/requirements.txt`: fastapi 0.143.0, strawberry-graphql 0.332.1, uvicorn 0.54.0, pydantic 2.14.0, httpx 0.28.1, python-json-logger 4.2.0, boto3, watchtower |
 | W `docker-compose.yml` | `docker-compose.yml` | Supabase, Dask and ingestion removed; `amazon/dynamodb-local` + seed one-shot added |
 | W `frontend/` (apollo, gql, `ui/*`, `status-badge.tsx`) | `frontend/` | `output: "export"`, auth pages removed, runtime `/config.json` |
 | W `frontend/src/app/reservas/[id]/page.tsx` | `frontend/src/app/saga/page.tsx` | Dynamic route → `?id=` query page; steps relabelled |
 | T `frontend/src/components/dev-drawer.tsx` | `frontend/src/components/flags-panel.tsx` | Switches wired to `flags` / `setFlag` |
 | T `frontend/src/components/state-badge.tsx` + `globals.css` tokens | `frontend/src/components/state-badge.tsx` | Relabelled for connector and saga states |
 | W `scripts/simulate_saga.py`, T `scripts/simulate.py` | `tests/e2e/test_saga.py` | Scenario tables → `pytest.mark.parametrize`; assert the compensation order |
-| W `scripts/test_participants.py`, G `backend/test/commands.test.js` | `tests/integration/test_participants.py` | pytest against DynamoDB Local: idempotency, tombstone, 3 parallel `startCharge` on one connector → exactly 1 wins |
+| W `scripts/test_participants.py`, G `backend/test/commands.test.js` | `services/test_unit.py` + `tests/integration/test_stack.py` | Idempotency + tombstone on moto; 3 parallel `startCharge` on one connector → exactly 1 wins, against the stack |
 | W `ingestion/flows/ingest.py`, D `flows/clean_pipeline.py` | `prefect/flows.py` | Artifacts, `.serve(cron)`, task retries, quality gate; Dask removed |
 | W `scripts/reconcile.sql` | `saga_audit` cross-checks | SQL → DynamoDB scan assertions |
 | W `scripts/ingestion_report.py` | `scripts/prefect_report.py` | Reads flow runs and artifacts back for the S6 gate |

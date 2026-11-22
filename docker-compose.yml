@@ -1,0 +1,85 @@
+# Local stack (SPEC §14), based on wandersync's x-service anchor: DynamoDB Local + seed + 4 services.
+# Gateway: http://localhost:8080/graphql
+name: aegisvolt
+
+networks:
+  aegisvolt-net:
+
+x-env: &env
+  ENV: local
+  VERSION: stable
+  AWS_REGION: us-east-1
+  AWS_ACCESS_KEY_ID: local
+  AWS_SECRET_ACCESS_KEY: local
+  DYNAMODB_ENDPOINT: http://dynamodb:8000
+  FLAGS_TABLE: aegisvolt-flags-local
+  CLOUDWATCH_LOGS: "false"
+
+x-service: &service
+  networks: [aegisvolt-net]
+  restart: unless-stopped
+  depends_on:
+    seed: { condition: service_completed_successfully }
+  healthcheck:
+    test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=2)"]
+    interval: 5s
+    timeout: 3s
+    retries: 10
+    start_period: 5s
+
+services:
+  dynamodb:
+    image: amazon/dynamodb-local:3.1.0
+    command: ["-jar", "DynamoDBLocal.jar", "-inMemory", "-sharedDb"]
+    networks: [aegisvolt-net]
+    ports: ["127.0.0.1:8000:8000"]
+
+  seed:
+    build: { context: services, dockerfile: Dockerfile, args: { SERVICE: gateway } }
+    image: aegisvolt-gateway
+    networks: [aegisvolt-net]
+    environment: *env
+    volumes: ["./scripts:/scripts:ro,z", "./seed:/seed:ro,z"]
+    command: ["python", "/scripts/seed_local.py", "local", "dev"]
+    depends_on: [dynamodb]
+    restart: on-failure
+
+  reservation:
+    <<: *service
+    build: { context: services, dockerfile: Dockerfile, args: { SERVICE: reservation } }
+    image: aegisvolt-reservation
+    environment: { <<: *env, SERVICE_NAME: station-reservation-service, TABLE_NAME: aegisvolt-reservations-local }
+
+  billing:
+    <<: *service
+    build: { context: services, dockerfile: Dockerfile, args: { SERVICE: billing } }
+    image: aegisvolt-billing
+    environment: { <<: *env, SERVICE_NAME: billing-wallet-service, TABLE_NAME: aegisvolt-billing-local }
+
+  dispatch:
+    <<: *service
+    build: { context: services, dockerfile: Dockerfile, args: { SERVICE: dispatch } }
+    image: aegisvolt-dispatch
+    environment: { <<: *env, SERVICE_NAME: energy-dispatch-service, TABLE_NAME: aegisvolt-dispatch-local }
+
+  gateway:
+    <<: *service
+    build: { context: services, dockerfile: Dockerfile, args: { SERVICE: gateway } }
+    image: aegisvolt-gateway
+    environment:
+      <<: *env
+      SERVICE_NAME: graphql-gateway
+      TABLE_NAME: aegisvolt-sagas-local
+      SAGAS_TABLE: aegisvolt-sagas-local
+      RESERVATION_URL: http://reservation:8000
+      BILLING_URL: http://billing:8000
+      DISPATCH_URL: http://dispatch:8000
+      ADMIN_TOKEN: local-admin
+      CORS_ORIGINS: http://localhost:3000
+      SAGA_STEP_DELAY_SECONDS: ${SAGA_STEP_DELAY_SECONDS:-1.5}
+    ports: ["127.0.0.1:8080:8000"]
+    depends_on:
+      seed: { condition: service_completed_successfully }
+      reservation: { condition: service_healthy }
+      billing: { condition: service_healthy }
+      dispatch: { condition: service_healthy }
