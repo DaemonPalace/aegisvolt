@@ -301,7 +301,9 @@ type Mutation {
   - `Service <svc>`: selector `app=<svc>`, so traffic splits by replica ratio. During a rollout that is 1 canary out of 5 pods = **20%**.
 - The gateway Service is a `NodePort` on 30080. The other Services are `ClusterIP` on port 80, targeting container port 8000.
 - Probes: readiness and liveness on `GET /health`. Resources: requests 50m CPU / 64Mi memory, limit 128Mi memory.
-- `scripts/deploy.sh <env> <tag>`: renders the manifests with `envsubst` and sends them to the node with `aws ssm send-command` (`kubectl apply`). On the first deploy, stable gets the tag directly.
+- `scripts/build-push.sh <tag>`: builds the 4 images and pushes `ghcr.io/daemonpalace/aegisvolt-<svc>:<tag>`. The packages are public, so the node needs no pull secret.
+- `scripts/deploy.sh <env> <tag>`: ships `k8s/` to the node with `aws ssm send-command` (helper `scripts/ssm.sh`), renders it there with `envsubst`, and runs `kubectl apply`. Stable keeps the tag it already runs; only the first deploy puts `<tag>` on stable directly. Canary Deployments are re-applied at 0 replicas.
+- Pods get `AWS_DEFAULT_REGION` as well as `AWS_REGION`, because botocore (watchtower's client) reads only the former.
 - `scripts/canary.sh <env> <svc> <tag>` runs on the node through SSM:
   1. Set the canary image to `<tag>` and scale the canary to 1.
   2. Wait up to 120 s for the canary pod to be Ready.

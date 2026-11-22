@@ -1,0 +1,48 @@
+# One Deployment per (service, track). Rendered on the node with envsubst by scripts/deploy.sh (SPEC §10).
+# Vars: SVC TRACK REPLICAS IMAGE TAG SERVICE_NAME TABLE_NAME ENV
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ${SVC}-${TRACK}
+  namespace: aegisvolt
+  labels: { app: ${SVC}, track: ${TRACK} }
+spec:
+  replicas: ${REPLICAS}
+  selector:
+    matchLabels: { app: ${SVC}, track: ${TRACK} }
+  template:
+    metadata:
+      labels: { app: ${SVC}, track: ${TRACK} }
+    spec:
+      containers:
+        - name: app
+          image: ${IMAGE}:${TAG}
+          ports: [{ containerPort: 8000 }]
+          env:
+            - { name: ENV, value: "${ENV}" }
+            - { name: SERVICE_NAME, value: "${SERVICE_NAME}" }
+            - { name: VERSION, value: "${TRACK}" }
+            - { name: IMAGE_TAG, value: "${TAG}" }
+            - { name: AWS_REGION, value: us-east-1 }
+            - { name: AWS_DEFAULT_REGION, value: us-east-1 }  # botocore (watchtower client) reads only this one
+            - { name: TABLE_NAME, value: "${TABLE_NAME}" }
+            - { name: FLAGS_TABLE, value: "aegisvolt-flags-${ENV}" }
+            - { name: SAGAS_TABLE, value: "aegisvolt-sagas-${ENV}" }
+            - { name: RESERVATION_URL, value: http://reservation }
+            - { name: BILLING_URL, value: http://billing }
+            - { name: DISPATCH_URL, value: http://dispatch }
+            - { name: CORS_ORIGINS, value: "${CORS_ORIGINS}" }
+            - { name: CLOUDWATCH_LOGS, value: "true" }
+            # ponytail: every service gets the demo ADMIN_TOKEN (only the gateway reads it); one template instead of four.
+            - name: ADMIN_TOKEN
+              valueFrom: { secretKeyRef: { name: aegisvolt-secrets, key: ADMIN_TOKEN } }
+          readinessProbe:
+            httpGet: { path: /health, port: 8000 }
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /health, port: 8000 }
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits: { memory: 128Mi }
