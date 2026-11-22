@@ -7,7 +7,8 @@ Plan: stages S0–S7. Each stage ends with a manual review gate. Deadline: 2026-
 - S0 Bootstrap: done (PR #1)
 - S1 Infra: done, dev applied (PR #2). Node `i-0ac341dfa40ce9367`, api_url `https://c2sp5wscqc.execute-api.us-east-1.amazonaws.com/dev/graphql`
 - S2 Services: done (PR #3). Local stack: `docker compose up -d --build --wait`; tests: `.venv/bin/pytest` (venv from `requirements-dev.txt`, Python 3.12)
-- **Next: S3** (k8s manifests, `deploy.sh`, `canary.sh` over SSM, deploy to dev). Then S4 CI/CD, S5 frontend, S6 observability, S7 promotion + DEFENSE.md
+- S3 K8s/Canary: done (PR #5). Images: public `ghcr.io/daemonpalace/aegisvolt-<svc>:<sha7>`; `scripts/{build-push,deploy,canary}.sh`
+- **Next: S4** (`pr.yml`, `deploy.yml`, required checks). Then S5 frontend, S6 observability, S7 promotion + DEFENSE.md
 
 ## 0. Conventions
 
@@ -326,8 +327,8 @@ type Mutation {
     - No role gets AdministratorAccess.
     - Humans use the IAM user `AegisVOlt-manager` (CLI profile `aegisvolt`) with the customer-managed policy `exam-aegisvolt-operator` (`bootstrap/operator-policy.json`). Root is never used.
     - Every `aegisvolt-*` role, Terraform-created or not, **must** set `permissions_boundary = arn:aws:iam::272973566676:policy/exam-aegisvolt-boundary` (`bootstrap/boundary-policy.json`). The operator policy denies creating a role or attaching a policy without it. The boundary's name sits outside `aegisvolt-*`, so neither humans nor CI can edit it. Together these block privilege escalation through a role we create.
-  - **`aegisvolt-gha-plan`**: trust `repo:DaemonPalace/aegisvolt:pull_request`. Permissions: `ReadOnlyAccess`, plus read/write on the state bucket (plan needs the lockfile).
-  - **`aegisvolt-gha-deploy`**: trust only `repo:DaemonPalace/aegisvolt:ref:refs/heads/{dev,test,prod}`. Permissions are an inline policy:
+  - **`aegisvolt-gha-plan`**: trust `repo:DaemonPalace@176678192/aegisvolt@1467661995:pull_request` (the repo uses GitHub's immutable OIDC subject, with numeric owner and repo IDs). Permissions: `ReadOnlyAccess`, plus read/write on the state bucket (plan needs the lockfile).
+  - **`aegisvolt-gha-deploy`**: trust only `repo:DaemonPalace@176678192/aegisvolt@1467661995:ref:refs/heads/{dev,test,prod}`. Permissions are an inline policy:
     - ec2, elasticloadbalancing, apigateway, logs, cloudwatch, ssm: full access to those service APIs. The account has no other EC2/VPC/API Gateway REST workloads besides the default VPC.
     - dynamodb: `arn:…:table/aegisvolt-*` only.
     - s3: `aegisvolt-*` buckets only.
@@ -344,7 +345,7 @@ type Mutation {
   1. Set `ENV=${{ github.ref_name }}`, which is the **dynamic target detection**.
   2. `terraform workspace select $ENV` and `terraform apply -auto-approve`.
   3. Build images and push them to `ghcr.io/<owner>/aegisvolt-<svc>:<sha>`.
-  4. For each service whose image changed, run `canary.sh` through SSM. The first deploy goes straight to stable.
+  4. For each service whose image changed, run `canary.sh` through SSM, one matrix job per service. A change in `services/common`, the Dockerfile or `requirements.txt` counts for all 4. On the first deploy `deploy.sh` puts the tag on stable and `canary.sh` skips.
   5. Build the frontend (`next build`, static export), write `out/config.json = {apiUrl, env}`, and publish it to the env's web host (decided in S5).
   6. Run a post-deploy smoke test: the GraphQL `health` query against `api_url`.
 - **Branch protection** (`scripts/protect-branches.sh`, using `gh api`) on `dev`, `test` and `prod`:

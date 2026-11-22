@@ -23,7 +23,9 @@ provider "aws" {
 data "aws_caller_identity" "me" {}
 
 locals {
-  repo         = "DaemonPalace/aegisvolt"
+  # The repo uses GitHub's immutable OIDC subject: owner and repo carry their numeric IDs
+  # (gh api repos/DaemonPalace/aegisvolt/actions/oidc/customization/sub).
+  sub_prefix   = "repo:DaemonPalace@176678192/aegisvolt@1467661995"
   state_bucket = "aegisvolt-tfstate-${data.aws_caller_identity.me.account_id}"
   boundary_arn = "arn:aws:iam::${data.aws_caller_identity.me.account_id}:policy/exam-aegisvolt-boundary"
 }
@@ -66,8 +68,8 @@ data "aws_iam_openid_connect_provider" "github" {
 
 data "aws_iam_policy_document" "trust" {
   for_each = {
-    plan   = ["repo:${local.repo}:pull_request"]
-    deploy = [for b in ["dev", "test", "prod"] : "repo:${local.repo}:ref:refs/heads/${b}"]
+    plan   = ["${local.sub_prefix}:pull_request"]
+    deploy = [for b in ["dev", "test", "prod"] : "${local.sub_prefix}:ref:refs/heads/${b}"]
   }
   statement {
     actions = ["sts:AssumeRoleWithWebIdentity"]

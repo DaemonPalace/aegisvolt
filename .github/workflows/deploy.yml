@@ -1,0 +1,87 @@
+# Deploy on push to an env branch (SPEC §11). The branch name is the target env (dynamic target detection).
+name: deploy
+on:
+  push:
+    branches: [dev, test, prod]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-${{ github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  ENV: ${{ github.ref_name }}
+  TF_VERSION: 1.17.1
+  AWS_REGION: us-east-1
+  DEPLOY_ROLE: arn:aws:iam::272973566676:role/aegisvolt-gha-deploy
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions: { contents: read, id-token: write, packages: write }
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      services: ${{ steps.changed.outputs.services }}
+      api_url: ${{ steps.apply.outputs.api_url }}
+    steps:
+      - uses: actions/checkout@v7
+        with: { fetch-depth: 0 }
+      - id: tag
+        run: echo "tag=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+      - uses: aws-actions/configure-aws-credentials@v6
+        with: { role-to-assume: "${{ env.DEPLOY_ROLE }}", aws-region: "${{ env.AWS_REGION }}" }
+      - uses: hashicorp/setup-terraform@v4
+        with: { terraform_version: "${{ env.TF_VERSION }}", terraform_wrapper: false }
+      - name: terraform apply (workspace = branch)
+        id: apply
+        working-directory: infra
+        run: |
+          terraform init -input=false
+          terraform workspace select "$ENV"
+          terraform apply -auto-approve -input=false -lock-timeout=120s
+          echo "api_url=$(terraform output -raw api_url)" >> "$GITHUB_OUTPUT"
+      - uses: docker/login-action@v4
+        with: { registry: ghcr.io, username: "${{ github.actor }}", password: "${{ github.token }}" }
+      - run: scripts/build-push.sh ${{ steps.tag.outputs.tag }}
+      - run: scripts/deploy.sh "$ENV" ${{ steps.tag.outputs.tag }}
+      - name: Services whose image changed since the previous push
+        id: changed
+        env: { BEFORE: "${{ github.event.before }}" }
+        run: |
+          all='["gateway","reservation","billing","dispatch"]'
+          if ! git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then echo "services=$all" >> "$GITHUB_OUTPUT"; exit 0; fi
+          files=$(git diff --name-only "$BEFORE" HEAD -- services ':!services/test_unit.py')
+          if grep -qE '^services/(common/|Dockerfile|requirements.txt)' <<<"$files"; then svcs=$all
+          else svcs=$(grep -oE '^services/(gateway|reservation|billing|dispatch)/' <<<"$files" | cut -d/ -f2 | sort -u | jq -Rnc '[inputs]'); fi
+          echo "services=${svcs:-[]}" >> "$GITHUB_OUTPUT"
+          echo "changed: ${svcs:-none}"
+
+  canary:
+    needs: deploy
+    if: needs.deploy.outputs.services != '[]'
+    runs-on: ubuntu-latest
+    permissions: { contents: read, id-token: write }
+    strategy:
+      fail-fast: false
+      # ponytail: canaries run in parallel and CanaryErrors has no service dimension, so one bad canary blocks all; add a dimension if that bites.
+      matrix: { service: "${{ fromJSON(needs.deploy.outputs.services) }}" }
+    steps:
+      - uses: actions/checkout@v7
+      - uses: aws-actions/configure-aws-credentials@v6
+        with: { role-to-assume: "${{ env.DEPLOY_ROLE }}", aws-region: "${{ env.AWS_REGION }}" }
+      - run: scripts/canary.sh "$ENV" ${{ matrix.service }} ${{ needs.deploy.outputs.tag }}
+
+  smoke:
+    needs: [deploy, canary]
+    if: ${{ !failure() && !cancelled() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: GraphQL health through API Gateway
+        env: { API_URL: "${{ needs.deploy.outputs.api_url }}" }
+        run: |
+          out=$(curl -sf -m 20 -X POST "$API_URL" -H 'content-type: application/json' \
+            -d '{"query":"{ health { env services { service status version } } }"}')
+          echo "$out"
+          jq -e --arg env "$ENV" '.data.health.env == $env and ([.data.health.services[].status] | all(. == "ok"))' <<<"$out"
