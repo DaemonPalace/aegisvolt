@@ -7,12 +7,10 @@ Plan: stages S0–S7. Each stage ends with a manual review gate. Deadline: 2026-
 
 - **Environments**: `dev`, `test`, `prod`. Each env has a Terraform workspace, a Git branch, a VPC, a k3s node, an API Gateway, tables and log groups of the same name.
 - **Naming**: `aegisvolt-<resource>-${terraform.workspace}` (example: `aegisvolt-billing-test`). Log groups: `/aegisvolt/<env>/<service>`.
-- **Region**: `us-east-1`. **Terraform** ≥ 1.10. **Python** 3.12 (container base `python:3.12-slim`). **Node** 22 (frontend build only).
+- **Region**: `us-east-1`. **Terraform** ≥ 1.10. **Python** 3.12 (container base `python:3.12-slim`). **Node** 22 (frontend build only: Next.js 16 static export).
 - **Money**: integer cents (USD). **Time**: ISO-8601 UTC strings.
 - **Correlation**: `sagaId` (UUIDv4) is the `correlation_id`. The gateway generates it and sends it to every downstream call as the `X-Correlation-ID` header. Every service logs it.
-- **Reused patterns** from `../Taller-PatronSaga`:
-  - The orchestrator style (httpx calls + explicit compensation in reverse order) from `services/saga-orchestrator/app/flow.py`.
-  - The "idempotency record returns cached result" idea from `services/account-service/app/core.py`. Here it is ported to DynamoDB conditional writes.
+- **Reuse first**: services, frontend, tests and Prefect flows are ported from earlier course projects (mainly `../wandersync` and `../Taller-PatronSaga`). See §17 for each donor file and what changed.
 
 ## 1. Repository layout
 
@@ -20,20 +18,19 @@ Plan: stages S0–S7. Each stage ends with a manual review gate. Deadline: 2026-
 aegisvolt/
 ├── SPEC.md  DEFENSE.md  README.md
 ├── bootstrap/                 # local-state TF: state bucket + 2 GitHub roles; reuses the existing OIDC provider (run once)
-├── infra/                     # root TF module, one workspace per env
-│   ├── main.tf  variables.tf  outputs.tf  backend.tf  envs.tf
-│   └── modules/{network,data,k3s,apigw,observability,web}/
+├── infra/                     # root TF module (main.tf: backend, envs map, workspace guard, outputs)
+│   └── modules/{network,data,k3s,apigw,observability}/   # web hosting decided in S5
 ├── seed/seed.json             # stations, connectors, fleets, flag defaults (used by TF AND local seed)
 ├── services/
-│   ├── common/                # log.py, flags.py, ddb.py (copied into each image)
-│   ├── gateway/               # Strawberry GraphQL + SAGA orchestrator
+│   ├── common/                # web.py (app factory), log.py, flags.py, ddb.py, delay.py (copied into each image)
+│   ├── gateway/               # app.py + schema.py (Strawberry GraphQL) + saga.py (SAGA orchestrator)
 │   ├── reservation/  billing/  dispatch/   # FastAPI
 │   └── requirements.txt       # single shared requirements file
 ├── k8s/                       # manifests rendered with envsubst
-├── frontend/                  # React + Vite
+├── frontend/                  # Next.js 16 static export (output: "export")
 ├── prefect/flows.py
 ├── tests/{integration,e2e}/   # unit tests live next to each service
-├── scripts/                   # protect-branches.sh deploy.sh canary.sh seed_local.py demo.sh
+├── scripts/                   # protect-branches.sh deploy.sh canary.sh seed_local.py prefect_report.py demo.sh
 ├── docker-compose.yml
 └── .github/workflows/{pr.yml,deploy.yml}
 ```
@@ -122,6 +119,8 @@ A `TransactionCanceledException` caused by the duplicate-marker condition counts
 
 ## 6. SAGA — "Reserve & Activate Charge" (orchestration in gateway)
 
+Orchestrator: `services/gateway/saga.py`, a plain-async port of wandersync's `services/orders-billing/saga.py` with the Prefect decorators removed. Charging never depends on Prefect being reachable; Prefect only observes (§13).
+
 ```
 startCharge ─► sagas row STARTED
   1 reservation /reserve   ─fail─► status FAILED (nothing to compensate)
@@ -134,7 +133,11 @@ stopCharge(sagaId) ─► dispatch /stop ─► reservation /release ─► STOP
 - **Saga statuses**: `STARTED`, `COMPLETED`, `FAILED`, `COMPENSATED`, `COMPENSATION_FAILED`, `STOPPED`.
 - **Step statuses**: `OK`, `FAILED`, `COMPENSATED`.
 - Each step appends `{name, status, at, detail}` to `steps`, and the saga row is updated after every step. The UI history panel and Prefect audit read from this row.
-- Compensation calls are retried 3 times with exponential backoff (0.5 s, 1 s, 2 s). If a compensation is still failing after the retries, the saga status becomes `COMPENSATION_FAILED`. Prefect flags it as an orphan.
+- **Retry policy** (carried over from wandersync ADR-05 and ADR-06):
+  - Forward steps are retried once on a 5xx or a transport error. A 4xx is a business rejection and is not retried.
+  - A timeout (`SAGA_CLIENT_TIMEOUT_SECONDS`) is treated as a failure, because the outcome is unknown, so it is compensated too. Compensations are idempotent, so this is safe.
+  - Compensations are retried up to 5 times, with backoff 1/2/4/8/16 s. If they are still failing, the status becomes `COMPENSATION_FAILED`, and Prefect flags the saga as an orphan.
+- **Crash recovery**: at gateway startup, sagas still `STARTED` after 60 s are compensated (ported from wandersync's `orders-billing/app.py` recovery).
 - **Idempotency**:
   - Every forward step and every compensation is keyed by `(sagaId, step)` through a DynamoDB conditional write, so a replayed request returns the first result and changes nothing.
   - `startCharge` also accepts an optional client `idempotencyKey`. If a saga row with that id already exists, the mutation returns it unchanged.
@@ -199,8 +202,15 @@ type Mutation {
 | `ADMIN_TOKEN` | gateway | secret |
 | `CORS_ORIGINS` | gateway | web bucket URL |
 | `CLOUDWATCH_LOGS` | all | `true` on AWS, `false` locally |
+| `SAGA_STEP_DELAY_SECONDS` | gateway | `1.5` (so the UI shows each step; `0` in tests) |
+| `SAGA_CLIENT_TIMEOUT_SECONDS` | gateway | `5` |
 
-**Logging** (`services/common/log.py`): one JSON line per event, written to stdout. When `CLOUDWATCH_LOGS=true`, lines also go through `watchtower` to group `/aegisvolt/<env>/<service>` with stream `<pod-name>`.
+**App factory** (`services/common/web.py`, ported from wandersync's `make_app`):
+- `/health` runs `describe_table` on the service's own table.
+- A middleware reads `X-Correlation-ID` (or creates one) into a contextvar, and the logger adds it to every line.
+- Every response carries an `X-Version: stable|canary` header (used by the canary gate, §10).
+
+**Logging** (`services/common/log.py`, `python-json-logger`): one JSON line per event, written to stdout. When `CLOUDWATCH_LOGS=true`, lines also go through `watchtower` to group `/aegisvolt/<env>/<service>` with stream `<pod-name>`.
 
 ```json
 {"ts":"…","level":"INFO","env":"dev","service":"billing-wallet-service","version":"stable","image_tag":"ab12cd3","correlation_id":"<sagaId>","event":"saga.step.ok","msg":"charged","amount_cents":1875}
@@ -212,7 +222,7 @@ type Mutation {
 - The bootstrap creates bucket `aegisvolt-tfstate-<account_id>` with versioning, SSE-S3, and a public-access block.
 - Backend: `key = "aegisvolt/terraform.tfstate"`, `use_lockfile = true`, default `workspace_key_prefix`. Objects land at `env:/<ws>/aegisvolt/terraform.tfstate`.
 
-**Workspace guard**: `envs.tf` holds a `locals.envs` map keyed by `dev`, `test`, `prod`. A `check`/precondition fails the run when `terraform.workspace` is not one of those keys, so `default` is rejected.
+**Workspace guard**: `infra/main.tf` holds a `locals.envs` map keyed by `dev`, `test`, `prod`. A `terraform_data` precondition fails the plan when `terraform.workspace` is not one of those keys, so `default` is rejected.
 
 | ws | VPC CIDR | instance |
 |---|---|---|
@@ -254,9 +264,9 @@ type Mutation {
     - `{ $.level = "ERROR" && $.version = "canary" }` → `CanaryErrors`
     - `{ $.event = "saga.compensated" }` → `SagaCompensations`
   - A Logs Insights saved query `aegisvolt-<env>-by-correlation`.
-- **web**: S3 bucket `aegisvolt-web-<env>-<account>` with static website hosting and a public-read policy limited to `GetObject`.
+- **web** (S5): frontend hosting, either an S3 static website or an nginx pod (see §12).
 
-**Outputs**: `api_url`, `vpc_endpoint_service`, `web_url`, `instance_id`, `tables`, `log_groups`, `admin_token` (sensitive).
+**Outputs**: `api_url`, `nlb_arn` (the endpoint service is looked up by it), `instance_id`, `tables`, `log_groups`, `admin_token` (sensitive). `web_url` is added in S5.
 
 **Packet path** (this is the defense answer; it goes into DEFENSE.md). It follows the diagram from top to bottom.
 1. **Client to API Gateway** (`HTTPS / WSS`): the browser sends HTTPS to the REST API over the internet. No VPCE is involved, because a VPCE serves callers inside the VPC.
@@ -287,12 +297,12 @@ type Mutation {
 - `scripts/canary.sh <env> <svc> <tag>` runs on the node through SSM:
   1. Set the canary image to `<tag>` and scale the canary to 1.
   2. Wait up to 120 s for the canary pod to be Ready.
-  3. Run a smoke loop: 50 × `GET /health` through the Service ClusterIP.
+  3. Run a smoke loop: 50 × `GET /health` through the Service ClusterIP. Each response is counted by its `X-Version` header (traffic-split pattern from `PA-Taller-Clase4/traffic-test.js`), so the error rate is measured **per version**.
   4. Wait 60 s, then read the `CanaryErrors` sum over the last 3 minutes.
   5. **Promote** only if all of these hold:
      - the canary pod is Ready
      - the canary pod has 0 restarts
-     - the smoke-loop error rate is below 5%
+     - the canary's smoke-loop error rate is below 5%, and at least one request reached the canary
      - `CanaryErrors` = 0
   6. To promote: set the stable image to `<tag>`, run `rollout status`, and scale the canary to 0.
   7. **Otherwise**: scale the canary to 0, leave stable untouched, and exit 1. The pipeline job turns red.
@@ -315,17 +325,17 @@ type Mutation {
   - Forked PRs never receive an OIDC token, so a public repo doesn't expose these roles.
 - **`pr.yml`** runs on `pull_request` targeting `dev`, `test` or `prod`. The job names are the required checks:
   1. `promotion-guard`: allowed head branches are `feature/*` or `fix/*` for base `dev`, only `dev` for base `test`, and only `test` for base `prod`. Anything else fails.
-  2. `lint-build`: `ruff check`, `docker build` for all 4 images, the schema export diff, and `terraform fmt -check` + `validate`.
-  3. `unit-tests`: `pytest services`, using moto for DynamoDB.
+  2. `lint-build`: `ruff check`, `docker build` for all 4 images, the schema export diff, `next build` (static export to `frontend/out/`), and `terraform fmt -check` + `validate`.
+  3. `unit-tests`: `pytest services`, using moto for DynamoDB. The SAGA orchestrator functions are called directly; Prefect is not needed.
   4. `integration-tests`: `docker compose up` (DynamoDB Local + 4 services), then `pytest tests/integration` (tables + GraphQL).
-  5. `e2e-tests`: `pytest tests/e2e` drives the full flows through GraphQL: happy path, insufficient funds, hardware fault, idempotent replay, and the flag toggle.
+  5. `e2e-tests`: `pytest tests/e2e` drives the full flows through GraphQL as parametrized scenarios (ported from wandersync `scripts/simulate_saga.py` and Taller-PatronSaga `scripts/simulate.py`): happy path, insufficient funds, hardware fault, idempotent replay, and the flag toggle. Each scenario asserts the final status, the **compensation order**, and the DynamoDB state.
   6. `terraform-plan`: `terraform init`, then `terraform workspace select ${{ github.base_ref }}`, then `terraform plan -no-color`. The plan is posted as a PR comment.
 - **`deploy.yml`** runs on `push` to `dev`, `test` or `prod` with `concurrency: deploy-${{ github.ref_name }}`:
   1. Set `ENV=${{ github.ref_name }}`, which is the **dynamic target detection**.
   2. `terraform workspace select $ENV` and `terraform apply -auto-approve`.
   3. Build images and push them to `ghcr.io/<owner>/aegisvolt-<svc>:<sha>`.
   4. For each service whose image changed, run `canary.sh` through SSM. The first deploy goes straight to stable.
-  5. Build the frontend with `config.json = {apiUrl, env}`, then `aws s3 sync` to the web bucket.
+  5. Build the frontend (`next build`, static export), write `out/config.json = {apiUrl, env}`, and publish it to the env's web host (decided in S5).
   6. Run a post-deploy smoke test: the GraphQL `health` query against `api_url`.
 - **Branch protection** (`scripts/protect-branches.sh`, using `gh api`) on `dev`, `test` and `prod`:
   - pull request required, with `required_approving_review_count = 0`. You are the only developer and GitHub doesn't let you approve your own PR; the PR itself is the gate.
@@ -337,18 +347,29 @@ type Mutation {
     - **S4**: only after `pr.yml` has run green at least once on a PR, `protect-branches.sh --with-checks` adds the 6 PR jobs as required checks in strict mode.
 - The repo must be **public**, because a free plan can't protect branches on private repos.
 
-## 12. Frontend (React + Vite)
+## 12. Frontend (Next.js 16 static export)
 
-- At load it fetches `/config.json` to get `apiUrl` and `env`. It uses a plain `fetch` GraphQL helper (no Apollo) and polls every 2 s.
-- A header shows an env badge and the gateway version from `health`.
-- The UI has 4 panels:
-  1. **Stations**: a connector grid with status colours. ULTRA connectors are disabled when the boost flag is off.
-  2. **Start charge**: form with fleet, station, connector and kWh. Submitting calls `startCharge` and shows the step timeline live.
-  3. **Feature flags**: the flag list with toggles. `setFlag` uses an admin token held in `localStorage`.
-  4. **Saga history**: `sagas(limit:20)` with status, steps and compensations, plus wallet balance and transactions.
+- **Base**: the wandersync frontend (Next 16.3.8, React 19.2.8, Apollo Client 4.3.1, Tailwind 4, shadcn `ui/*`).
+  - `next.config.ts` uses `output: "export"` instead of `"standalone"`, so `next build` emits plain HTML/JS/CSS in `out/` with no server.
+  - The auth pages (`ingresar`, `admin`) are removed.
+- **Runtime config**: at load the app fetches `/config.json` to get `apiUrl` and `env`, so one build serves every env. Apollo Client uses `pollInterval: 2000`, and the saga page stops polling once the saga reaches a terminal state.
+- **Header**: an env badge and the gateway version from `health`.
+- **4 panels**, each built from a reused component:
+  1. **Stations**: a connector grid using `state-badge.tsx` (Taller-PatronSaga, relabelled) with the `--state-*` colour tokens. ULTRA connectors are disabled when the boost flag is off.
+  2. **Start charge**: a form calling `startCharge`. It links to `/saga?id=<sagaId>`, the timeline page ported from wandersync `reservas/[id]/page.tsx`, which shows forward steps and compensations in reverse order. It becomes a query-param page because static export can't serve dynamic routes.
+  3. **Feature flags**: `flags-panel.tsx`, ported from Taller-PatronSaga `dev-drawer.tsx` (Switch toggles). `setFlag` uses an admin token kept in `localStorage`.
+  4. **Saga history**: `sagas(limit:20)` with status badges, plus wallet balance and transactions.
+- **Hosting**: decided in S5. Either an S3 static website, if the account allows public buckets, or an nginx pod behind the same API Gateway.
 - `ponytail:` it polls instead of using WSS. The diagram's `HTTPS / WSS` means HTTPS is required and WSS is optional. API Gateway REST APIs can't carry WebSockets; WSS would need a separate API Gateway WebSocket API. Add one only if "real time" is challenged.
 
-## 13. Prefect (`prefect/flows.py`, Prefect Cloud free workspace)
+## 13. Prefect (`prefect/flows.py`, Prefect 3.8.6, Prefect Cloud free workspace)
+
+- Prefect **observes**; it does not run the SAGA (§6).
+- Donor patterns:
+  - `create_table_artifact` and `.serve(cron=…)` from wandersync `ingestion/flows/ingest.py`
+  - task `retries`/`retry_delay_seconds` and a quality gate that raises, from `Taller-DASK/flows/clean_pipeline.py`
+  - the `saga_audit` cross-checks, rewritten from wandersync `scripts/reconcile.sql`
+  - reading runs and artifacts back in `scripts/prefect_report.py`, from wandersync `scripts/ingestion_report.py`
 
 - `env_health` flow, scheduled every 5 min with `serve(cron=…)`: one task per env.
   - It calls GraphQL `health` on that env's `api_url`.
@@ -364,8 +385,8 @@ type Mutation {
 
 ## 14. Local development
 
-- `docker compose up` starts `dynamodb-local`, a `seed` one-shot container (`scripts/seed_local.py` creates the tables and loads `seed/seed.json` with dev flag defaults), the 4 services, and the frontend dev server.
-- The gateway listens on `localhost:8080/graphql` and the UI on `localhost:5173`.
+- The compose file is based on wandersync's `x-service` anchor (shared network, env, restart policy, health check, ports bound to 127.0.0.1). `docker compose up` starts `dynamodb-local`, a `seed` one-shot container (`scripts/seed_local.py` creates the tables and loads `seed/seed.json` with dev flag defaults), the 4 services, and the frontend dev server.
+- The gateway listens on `localhost:8080/graphql` and the UI (`next dev`) on `localhost:3000`.
 
 ## 15. Stage acceptance criteria (review gates)
 
@@ -376,7 +397,7 @@ type Mutation {
 | **S2 Services** | `docker compose up` is healthy. Unit tests pass. A local `startCharge` gives each expected outcome: happy path → COMPLETED; LOWFUNDS → COMPENSATED with the connector AVAILABLE; fault flag on → COMPENSATED with a REFUND txn and the connector AVAILABLE; replaying a compensation changes nothing. |
 | **S3 K8s/Canary** | The dev `api_url/graphql` answers `health`. `aws ec2 describe-vpc-endpoint-service-configurations` shows the endpoint service on the NLB, with API Gateway as an accepted connection. A canary with a deliberately broken tag is rolled back and stable keeps serving. A canary with a good tag is promoted. |
 | **S4 CI/CD** | `protect-branches.sh --with-checks` has run, and the branch settings list the 6 required checks. The `feature/x → dev` PR shows all 6 checks green and plans against the `dev` workspace. The merge triggers an apply in dev only. A `feature/x → test` PR fails `promotion-guard`. |
-| **S5 Frontend** | The dev web URL shows stations, flags and sagas. Toggling the fault flag in dev and starting a charge shows a compensated timeline. The prod UI is unchanged. |
+| **S5 Frontend** | `next build` emits `out/` with no server-only features. The dev web URL shows stations, flags and sagas. Toggling the fault flag in dev and starting a charge shows a compensated timeline. The prod UI is unchanged. |
 | **S6 Observability** | A failed saga's `correlation_id` is found with CloudWatch Logs Insights in `/aegisvolt/dev/*`. Both Prefect flows show runs and artifacts in the UI. |
 | **S7 Integration** | `dev → test → prod` promotion PRs are merged and all 3 envs are deployed. `scripts/demo.sh` runs every section-6 question without errors. `DEFENSE.md` is complete. |
 
@@ -389,3 +410,38 @@ type Mutation {
 - Custom domain/TLS on the web bucket (HTTP S3 website).
 - Floci.
 - No private API Gateway or `execute-api` VPCE. The diagram has one API Gateway, and its private hop is the VPC Link.
+
+## 17. Reuse map (donor → AegisVolt)
+
+Abbreviations: **W** = `../wandersync`, **T** = `../Taller-PatronSaga`, **G** = `../Taller-GraphQL`, **D** = `../Taller-DASK`, **C4** = `../PA-Taller-Clase4`. Nothing could be reused for Terraform, GitHub Actions, k8s manifests, boto3, watchtower or pytest, so those are new code.
+
+| Donor | Target | What changes |
+|---|---|---|
+| W `services/common/web.py` (`make_app`) | `services/common/web.py` | psycopg health check → DynamoDB `describe_table`. Add JSON logging, `X-Correlation-ID` contextvar middleware, `X-Version` header |
+| W `services/orders-billing/saga.py` | `services/gateway/saga.py` | Prefect decorators removed. Keep the step trail (now the `sagas` table), the 1-retry forward loop, timeout = compensate, and compensation backoff 1/2/4/8/16 s. Steps become reserve → charge → activate |
+| W `services/orders-billing/app.py` | `services/gateway/app.py` (startup, `startCharge`) | Idempotency key → DynamoDB conditional put. Startup recovery scans `STARTED` sagas |
+| W `services/common/participant.py` | `services/reservation/app.py`, `services/dispatch/app.py` | SQL → DynamoDB conditional writes; keep the tombstone for a release that arrives before its reserve. Failure injection reads `SIMULATE_CHARGER_HARDWARE_FAULT` |
+| T `services/account-service/app/core.py` | `services/billing/app.py` | Postgres ledger + idempotency records → one `TransactWriteItems` (§5) |
+| W `services/gateway/app.py` | `services/gateway/app.py` | Keep the Strawberry `GraphQLRouter`, `MaxAliasesLimiter`, CORS and security headers. Sessions removed; `X-Admin-Token` added for admin mutations |
+| W `services/gateway/schema.py`, G `backend/schema.graphql` | `services/gateway/schema.py` | Keep the enum, type and `userErrors` payload shapes; the domain comes from §7 |
+| T `shared/delay.py` | `services/common/delay.py` | Copied as-is |
+| W `services/*/Dockerfile` | `services/*/Dockerfile` | Copied (python:3.12-slim, non-root uid 10001). A single pinned `services/requirements.txt`: fastapi 0.143.0, strawberry-graphql 0.332.1, uvicorn 0.54.0, pydantic 2.14.0, httpx 0.28.1, python-json-logger 4.2.0, boto3, watchtower |
+| W `docker-compose.yml` | `docker-compose.yml` | Supabase, Dask and ingestion removed; `amazon/dynamodb-local` + seed one-shot added |
+| W `frontend/` (apollo, gql, `ui/*`, `status-badge.tsx`) | `frontend/` | `output: "export"`, auth pages removed, runtime `/config.json` |
+| W `frontend/src/app/reservas/[id]/page.tsx` | `frontend/src/app/saga/page.tsx` | Dynamic route → `?id=` query page; steps relabelled |
+| T `frontend/src/components/dev-drawer.tsx` | `frontend/src/components/flags-panel.tsx` | Switches wired to `flags` / `setFlag` |
+| T `frontend/src/components/state-badge.tsx` + `globals.css` tokens | `frontend/src/components/state-badge.tsx` | Relabelled for connector and saga states |
+| W `scripts/simulate_saga.py`, T `scripts/simulate.py` | `tests/e2e/test_saga.py` | Scenario tables → `pytest.mark.parametrize`; assert the compensation order |
+| W `scripts/test_participants.py`, G `backend/test/commands.test.js` | `tests/integration/test_participants.py` | pytest against DynamoDB Local: idempotency, tombstone, 3 parallel `startCharge` on one connector → exactly 1 wins |
+| W `ingestion/flows/ingest.py`, D `flows/clean_pipeline.py` | `prefect/flows.py` | Artifacts, `.serve(cron)`, task retries, quality gate; Dask removed |
+| W `scripts/reconcile.sql` | `saga_audit` cross-checks | SQL → DynamoDB scan assertions |
+| W `scripts/ingestion_report.py` | `scripts/prefect_report.py` | Reads flow runs and artifacts back for the S6 gate |
+| C4 `traffic-test.js` | `scripts/canary.sh` smoke loop | Counts by `X-Version` and computes the error rate per version; exit 1 if the canary error rate is ≥ 5% |
+| W `docs/design.md` ADR-05/06 | `DEFENSE.md` | Wording for the idempotency and compensation answers |
+
+**Not reused**:
+- RabbitMQ choreography (T `shared/rabbitmq.py`, `consumer.py`): the design uses orchestration.
+- pg_graphql (W `gateway/catalog.py`): Postgres-only.
+- Argon2 sessions (W `gateway/security.py`): there are no user accounts.
+- Dask.
+- primer-parcial: TypeScript Lambdas + Supabase.
