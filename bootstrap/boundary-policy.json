@@ -1,0 +1,259 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "OnlyUsEast1",
+      "Effect": "Deny",
+      "NotAction": [
+        "iam:*",
+        "sts:*",
+        "s3:*",
+        "signin:*",
+        "ce:*",
+        "budgets:*"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringNotEquals": {
+          "aws:RequestedRegion": "us-east-1"
+        }
+      }
+    },
+    {
+      "Sid": "ReadOnlyEverywhere",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:Describe*",
+        "elasticloadbalancing:Describe*",
+        "dynamodb:List*",
+        "dynamodb:Describe*",
+        "logs:Describe*",
+        "cloudwatch:GetMetric*",
+        "cloudwatch:ListMetrics",
+        "cloudwatch:DescribeAlarms",
+        "ssm:DescribeInstanceInformation",
+        "ssm:GetCommandInvocation",
+        "ssm:ListCommand*",
+        "iam:Get*",
+        "iam:List*",
+        "s3:ListAllMyBuckets",
+        "ce:GetCostAndUsage",
+        "budgets:ViewBudget",
+        "apigateway:GET",
+        "tag:GetResources"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "Ec2NetworkingAndCompute",
+      "Effect": "Allow",
+      "Action": "ec2:*",
+      "Resource": "*"
+    },
+    {
+      "Sid": "ProtectDefaultVpc",
+      "Effect": "Deny",
+      "Action": [
+        "ec2:Delete*",
+        "ec2:Modify*",
+        "ec2:Detach*",
+        "ec2:Disassociate*",
+        "ec2:Revoke*",
+        "ec2:Replace*",
+        "ec2:Authorize*",
+        "ec2:Create*",
+        "ec2:RunInstances"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "ec2:Vpc": "arn:aws:ec2:us-east-1:272973566676:vpc/vpc-0d730b1b5462ab0a4"
+        }
+      }
+    },
+    {
+      "Sid": "ProtectDefaultVpcItself",
+      "Effect": "Deny",
+      "Action": [
+        "ec2:DeleteVpc",
+        "ec2:ModifyVpc*",
+        "ec2:DetachInternetGateway"
+      ],
+      "Resource": "arn:aws:ec2:us-east-1:272973566676:vpc/vpc-0d730b1b5462ab0a4"
+    },
+    {
+      "Sid": "LoadBalancerAegisOnly",
+      "Effect": "Allow",
+      "Action": "elasticloadbalancing:*",
+      "Resource": [
+        "arn:aws:elasticloadbalancing:us-east-1:272973566676:loadbalancer/net/aegisvolt-*",
+        "arn:aws:elasticloadbalancing:us-east-1:272973566676:targetgroup/aegisvolt-*",
+        "arn:aws:elasticloadbalancing:us-east-1:272973566676:listener/net/aegisvolt-*"
+      ]
+    },
+    {
+      "Sid": "ApiGatewayRestAndVpcLinksOnly",
+      "Effect": "Allow",
+      "Action": [
+        "apigateway:POST",
+        "apigateway:PUT",
+        "apigateway:PATCH",
+        "apigateway:DELETE"
+      ],
+      "Resource": [
+        "arn:aws:apigateway:us-east-1::/restapis",
+        "arn:aws:apigateway:us-east-1::/restapis/*",
+        "arn:aws:apigateway:us-east-1::/vpclinks",
+        "arn:aws:apigateway:us-east-1::/vpclinks/*",
+        "arn:aws:apigateway:us-east-1::/tags/*"
+      ]
+    },
+    {
+      "Sid": "DynamoAegisOnly",
+      "Effect": "Allow",
+      "Action": "dynamodb:*",
+      "Resource": "arn:aws:dynamodb:us-east-1:272973566676:table/aegisvolt-*"
+    },
+    {
+      "Sid": "LogsAegisOnly",
+      "Effect": "Allow",
+      "Action": "logs:*",
+      "Resource": "arn:aws:logs:us-east-1:272973566676:log-group:/aegisvolt/*"
+    },
+    {
+      "Sid": "LogsQueriesAndSavedQueries",
+      "Effect": "Allow",
+      "Action": [
+        "logs:PutQueryDefinition",
+        "logs:DeleteQueryDefinition",
+        "logs:GetQueryResults",
+        "logs:StopQuery",
+        "logs:FilterLogEvents",
+        "logs:StartQuery"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "CloudWatchAlarmsAegisOnly",
+      "Effect": "Allow",
+      "Action": [
+        "cloudwatch:PutMetricAlarm",
+        "cloudwatch:DeleteAlarms",
+        "cloudwatch:TagResource"
+      ],
+      "Resource": "arn:aws:cloudwatch:us-east-1:272973566676:alarm:aegisvolt-*"
+    },
+    {
+      "Sid": "S3AegisBucketsOnly",
+      "Effect": "Allow",
+      "Action": "s3:*",
+      "Resource": "arn:aws:s3:::aegisvolt-*"
+    },
+    {
+      "Sid": "IamAegisOnly",
+      "Effect": "Allow",
+      "Action": "iam:*",
+      "Resource": [
+        "arn:aws:iam::272973566676:role/aegisvolt-*",
+        "arn:aws:iam::272973566676:instance-profile/aegisvolt-*",
+        "arn:aws:iam::272973566676:policy/aegisvolt-*"
+      ]
+    },
+    {
+      "Sid": "ServiceLinkedRolesForNlbAndApiGw",
+      "Effect": "Allow",
+      "Action": "iam:CreateServiceLinkedRole",
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "iam:AWSServiceName": [
+            "elasticloadbalancing.amazonaws.com",
+            "ops.apigateway.amazonaws.com"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "SsmRunCommandOnAegisNodes",
+      "Effect": "Allow",
+      "Action": [
+        "ssm:SendCommand",
+        "ssm:StartSession"
+      ],
+      "Resource": "arn:aws:ec2:us-east-1:272973566676:instance/*",
+      "Condition": {
+        "StringEquals": {
+          "ssm:resourceTag/Project": "aegisvolt"
+        }
+      }
+    },
+    {
+      "Sid": "SsmDocumentsAndPublicParams",
+      "Effect": "Allow",
+      "Action": [
+        "ssm:SendCommand",
+        "ssm:StartSession",
+        "ssm:GetParameter",
+        "ssm:GetParameters",
+        "ssm:TerminateSession"
+      ],
+      "Resource": [
+        "arn:aws:ssm:us-east-1::document/AWS-RunShellScript",
+        "arn:aws:ssm:us-east-1::document/SSM-SessionManagerRunShell",
+        "arn:aws:ssm:us-east-1::parameter/aws/service/*",
+        "arn:aws:ssm:us-east-1:272973566676:session/*"
+      ]
+    },
+    {
+      "Sid": "RolesMustCarryBoundary",
+      "Effect": "Deny",
+      "Action": [
+        "iam:CreateRole",
+        "iam:PutRolePermissionsBoundary",
+        "iam:AttachRolePolicy",
+        "iam:PutRolePolicy"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringNotEquals": {
+          "iam:PermissionsBoundary": "arn:aws:iam::272973566676:policy/exam-aegisvolt-boundary"
+        }
+      }
+    },
+    {
+      "Sid": "NeverRemoveBoundary",
+      "Effect": "Deny",
+      "Action": "iam:DeleteRolePermissionsBoundary",
+      "Resource": "*"
+    },
+    {
+      "Sid": "SsmAgentOnNode",
+      "Effect": "Allow",
+      "Action": [
+        "ssm:UpdateInstanceInformation",
+        "ssm:ListInstanceAssociations",
+        "ssm:ListAssociations",
+        "ssm:DescribeAssociation",
+        "ssm:GetDocument",
+        "ssm:DescribeDocument",
+        "ssm:UpdateInstanceAssociationStatus",
+        "ssm:PutInventory",
+        "ssm:PutComplianceItems",
+        "ssm:PutConfigurePackageResult",
+        "ssm:GetManifest",
+        "ssm:GetDeployablePatchSnapshotForInstance",
+        "ssmmessages:*",
+        "ec2messages:*"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "StateBucketAndReadsForPlan",
+      "Effect": "Allow",
+      "Action": [
+        "sts:GetCallerIdentity"
+      ],
+      "Resource": "*"
+    }
+  ]
+}
