@@ -3,6 +3,12 @@
 Source requirements: `../ExamenFinal/Proyecto Final - Patrones Arquitectónicos Avanzados (AegisVolt).md`.
 Plan: stages S0–S7. Each stage ends with a manual review gate. Deadline: 2026-11-23 17:00.
 
+**Progress** (update at every gate):
+- S0 Bootstrap: done (PR #1)
+- S1 Infra: done, dev applied (PR #2). Node `i-0ac341dfa40ce9367`, api_url `https://c2sp5wscqc.execute-api.us-east-1.amazonaws.com/dev/graphql`
+- S2 Services: done (PR #3). Local stack: `docker compose up -d --build --wait`; tests: `.venv/bin/pytest` (venv from `requirements-dev.txt`, Python 3.12)
+- **Next: S3** (k8s manifests, `deploy.sh`, `canary.sh` over SSM, deploy to dev). Then S4 CI/CD, S5 frontend, S6 observability, S7 promotion + DEFENSE.md
+
 ## 0. Conventions
 
 - **Environments**: `dev`, `test`, `prod`. Each env has a Terraform workspace, a Git branch, a VPC, a k3s node, an API Gateway, tables and log groups of the same name.
