@@ -16,6 +16,10 @@ k() { kubectl -n aegisvolt "$@"; }
 retag() { k patch deploy "$1" -p "{\"spec\":{\"template\":{\"spec\":{\"containers\":[{\"name\":\"app\",\"image\":\"$IMAGE:$TAG\",\"env\":[{\"name\":\"IMAGE_TAG\",\"value\":\"$TAG\"}]}]}}}}"; }
 rollback() { echo "ROLLBACK $SVC:$TAG — $1"; k scale deploy "$SVC-canary" --replicas=0; exit 1; }
 
+# first deploy: deploy.sh already put this tag on stable
+[[ $(k get deploy "$SVC-stable" -o jsonpath='{.spec.template.spec.containers[0].image}') == "$IMAGE:$TAG" ]] \
+  && { echo "SKIP $SVC: stable already runs $TAG"; exit 0; }
+
 retag "$SVC-canary" && k scale deploy "$SVC-canary" --replicas=1
 k rollout status deploy "$SVC-canary" --timeout=120s || rollback "canary pod not Ready in 120s"
 
