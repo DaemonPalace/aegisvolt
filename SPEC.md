@@ -388,7 +388,7 @@ type Mutation {
 
 ## 13. Prefect (`prefect/flows.py`, Prefect 3.8.6, local self-hosted server)
 
-- **Where it runs**: on the operator's machine, not in any env. The server and UI are the `prefect-server` compose service (profile `observability`, UI on http://localhost:4200). The flows run as a local process: `PREFECT_API_URL=http://localhost:4200/api prefect/.venv/bin/python prefect/flows.py serve`. From there they reach every env over its public API Gateway URL and read its DynamoDB tables with the operator's AWS credentials. Nothing Prefect-related is deployed to k3s or Terraform.
+- **Where it runs**: on the operator's machine, not in any env. The server and UI are the `prefect-server` compose service (profile `observability`, UI on http://localhost:4200). The flows run as a local process: `PREFECT_API_URL=http://localhost:4200/api prefect/.venv/bin/python prefect/flows.py serve dev test prod` (no env args = every env in `envs.json`, including `local`). From there they reach every env over its public API Gateway URL and read its DynamoDB tables with the operator's AWS credentials. Nothing Prefect-related is deployed to k3s or Terraform.
 
 - Prefect **observes**; it does not run the SAGA (§6).
 - Donor patterns:
