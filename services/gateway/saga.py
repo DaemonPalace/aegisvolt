@@ -174,7 +174,9 @@ async def run(saga: dict) -> str:
                 event("saga.step.failed", f"{name}: {exc}", logging.WARNING, step=name)
                 undo = ([step] if isinstance(exc, StepTimeout) else []) + done[::-1]
                 if "CHARGER_HARDWARE_FAULT" in str(exc):
-                    saga["fault"] = True
+                    saga["fault"] = "fault"  # the charger answered with a fault: counted, closes at the threshold
+                elif name == "activate" and (isinstance(exc, StepTimeout) or "unreachable" in str(exc)):
+                    saga["fault"] = "unreachable"  # the charger did not answer at all: closes at once
                 if not undo:
                     saga["status"] = "FAILED"
                     await save(saga)
@@ -182,6 +184,7 @@ async def run(saga: dict) -> str:
                 return await compensate(saga, undo)
             if name == "reserve":
                 saga["power_kw"] = result.get("power_kw")
+                saga["fault_count"] = result.get("fault_count", 0)
             if name == "charge":
                 saga["amount_cents"] = result["amount_cents"]
             if name == "activate":
@@ -189,6 +192,8 @@ async def run(saga: dict) -> str:
             await record(saga, name, "OK", str(result))
             event("saga.step.ok", f"{name} ok", step=name)
             done.append(step)
+            if name == "activate" and saga.get("fault_count"):
+                await reset_faults(saga)
         saga["status"] = "COMPLETED"
         await save(saga)
         event("saga.completed", f"charging session active until {saga.get('ends_at')}")
@@ -200,26 +205,41 @@ async def run(saga: dict) -> str:
         raise
 
 
+async def reset_faults(saga: dict) -> None:
+    """The charger activated, so its fault streak is over. Only called when reserve reported faults (no extra call
+    otherwise); best effort, a failure here never fails the charge."""
+    try:
+        resp = await call("reservation", "POST", "/connectors/lifecycle", {**body(saga), "action": "healthy"})
+        resp.raise_for_status()
+        await record(saga, "healthy", "OK", f"fault count {saga['fault_count']} reset to 0")
+    except httpx.HTTPError as exc:
+        event("saga.fault_reset_failed", repr(exc), logging.WARNING)
+
+
 async def compensate(saga: dict, steps: list[tuple]) -> str:
     event("saga.compensating", f"undoing {[s[0] for s in steps]}")
-    ok = True
+    failed = []
     for name, service, _, path in steps:
         await asyncio.sleep(STEP_DELAY)
         try:
             result = await compensating(service, path, body(saga))
             await record(saga, name, "COMPENSATED", f"{path} {result}")
         except httpx.HTTPError as exc:
-            ok = False
+            failed.append(name)
             await record(saga, name, "FAILED", f"{path} gave up: {exc!r}")
-    if ok and saga.get("fault"):
-        # The SAGA is already undone (connector AVAILABLE, wallet refunded). This is not a compensation but the
-        # station-owner rule on top: a charger that reported a hardware fault stays closed until maintenance.
+    ok = not failed
+    if saga.get("fault") and "reserve" not in failed:
+        # The SAGA is already undone (connector released AVAILABLE, wallet refunded). This is not a compensation but
+        # the station-owner rule on top: a hardware fault is counted and the connector stays AVAILABLE until the 3rd
+        # in a row; an unreachable charger closes OUT_OF_SERVICE at once. Keyed by saga_id, so a replay counts once.
+        # Runs even if dispatch /stop gave up: a dead charger is exactly when the connector must close.
         try:
-            result = await compensating("reservation", "/connectors/lifecycle",
-                                        {**body(saga), "action": "fault", "note": "hardware fault during activation"})
-            await record(saga, "fault", "OK", str(result))
+            r = await compensating("reservation", "/connectors/lifecycle", {**body(saga), "action": saga["fault"]})
+            stays = "stays AVAILABLE" if r["status"] == "AVAILABLE" else f"now {r['status']}"
+            what = "charger unreachable" if saga["fault"] == "unreachable" else "hardware fault"
+            await record(saga, "fault", "OK", f"{what}: fault {r['fault_count']}/{r['threshold']}, connector {stays}")
         except httpx.HTTPError as exc:
-            await record(saga, "fault", "FAILED", f"could not close the connector: {exc!r}")
+            await record(saga, "fault", "FAILED", f"could not record the fault: {exc!r}")
     saga["status"] = "COMPENSATED" if ok else "COMPENSATION_FAILED"
     await save(saga)
     if ok:

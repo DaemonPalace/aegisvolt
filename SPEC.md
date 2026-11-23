@@ -10,7 +10,7 @@ Plan: stages S0–S7. Each stage ends with a manual review gate. Deadline: 2026-
 - S3 K8s/Canary: done (PR #5). Images: public `ghcr.io/daemonpalace/aegisvolt-<svc>:<sha7>`; `scripts/{build-push,deploy,canary}.sh`
 - S4 CI/CD: done (PR #6). 6 required checks (strict) on dev/test/prod; push to an env branch deploys that env
 - S5 Frontend: in review. Next.js static export on an S3 website per env (`web_url` output)
-- UX redesign: done (PR #11). Tabs Charge / Transactions / Station owner. Charges end FINISHED at `endsAt`. Connectors go OUT_OF_SERVICE after a fault, then MAINTENANCE. Deposits and new fleets. `seed_local.py --reset`
+- UX redesign: done (PR #11). Tabs Charge / Transactions / Station owner. Charges end FINISHED at `endsAt`. Connectors go OUT_OF_SERVICE after 3 consecutive hardware faults (or at once if the charger is unreachable), then MAINTENANCE. Deposits and new fleets. `seed_local.py --reset`
 - S6 Observability: done (PR #12). `scripts/trace.sh` and saved Logs Insights queries; `prefect/flows.py` (`env_health`, `saga_audit`) on a local Prefect server (compose profile `observability`)
 - **S7 Integration: in progress.** `dev → test` merged (PR #13). `DEFENSE.md` and `scripts/demo.sh` added. Next: `test → prod`, then `demo.sh envs`
 
@@ -85,7 +85,7 @@ There is one table per env: `aegisvolt-flags-<env>`. Terraform seeds the rows wi
 
 | Table (`-<env>`) | Owner | Items |
 |---|---|---|
-| `aegisvolt-reservations` | reservation | connector `pk=STATION#<id>`, `sk=CONNECTOR#<cid>` {type, power_kw, status `AVAILABLE`/`RESERVED`, saga_id, updated_at}; station meta `sk=META` {name, city}; idempotency marker `pk=SAGA#<sagaId>`, `sk=RESERVE`/`RELEASE` {result} |
+| `aegisvolt-reservations` | reservation | connector `pk=STATION#<id>`, `sk=CONNECTOR#<cid>` {type, power_kw, status `AVAILABLE`/`RESERVED`/`OUT_OF_SERVICE`/`MAINTENANCE`, saga_id, note, fault_count, last_fault_at, updated_at}; station meta `sk=META` {name, city}; idempotency marker `pk=SAGA#<sagaId>`, `sk=RESERVE`/`RELEASE`/`FAULT` {result} |
 | `aegisvolt-billing` | billing | wallet `pk=FLEET#<id>`, `sk=WALLET` {balance_cents}; txn `pk=FLEET#<id>`, `sk=TXN#<sagaId>#CHARGE`/`TXN#<sagaId>#REFUND`/`TXN#TOPUP#<ts>` {amount_cents, surge, created_at} |
 | `aegisvolt-dispatch` | dispatch | session `pk=SESSION#<sagaId>`, `sk=META` {status `ACTIVE`/`FAILED`/`STOPPED`, station_id, connector_id, kwh}; telemetry `pk=STATION#<id>`, `sk=TELEMETRY#<ts>` {saga_id, connector_id, power_kw, energy_kwh, voltage} |
 | `aegisvolt-sagas` | gateway | `pk=SAGA#<id>`, `sk=META` {status, fleet_id, station_id, connector_id, kwh, amount_cents, created_at, updated_at, steps: list of {name, status, at, detail}} |
@@ -103,6 +103,7 @@ All services expose `GET /health`, which returns `{status:"ok", service, env, ve
 | GET | `/stations` | — | 200 `[station + connectors]` |
 | POST | `/reserve` | `{saga_id, station_id, connector_id}` | 200 `{status:"RESERVED"}` · 409 not available · 403 ULTRA reserved while the boost flag is off |
 | POST | `/release` | `{saga_id, station_id, connector_id}` | 200 `{status:"AVAILABLE"}` (idempotent; releases only if `saga_id` matches the holder) |
+| POST | `/connectors/lifecycle` | `{station_id, connector_id, action, note?, saga_id?}` | `fault`/`unreachable` (SAGA, keyed by `saga_id`): 200 `{status, fault_count, threshold, replay}` · `healthy` (SAGA): resets the count · `maintenance`/`reopen` (owner): 200 `{status}` · 409 wrong source status |
 
 **billing** (`billing-wallet-service`)
 | Method | Path | Body | Responses |
@@ -150,6 +151,11 @@ stopCharge(sagaId) ─► dispatch /stop ─► reservation /release ─► STOP
   - Forward steps are retried once on a 5xx or a transport error. A 4xx is a business rejection and is not retried. A rejected step did not happen, so only the steps before it are compensated (step 1 rejected → `FAILED`).
   - A timeout (`SAGA_CLIENT_TIMEOUT_SECONDS`) is treated as a failure, because the outcome is unknown, so **the timed-out step is compensated too** (activate → dispatch `/stop`). Compensations are idempotent and tombstone-safe (a release/stop that lands before its forward call makes the late forward call refuse: 410/409), so this is safe.
   - Compensations are retried up to 5 times, with backoff 1/2/4/8/16 s. If they are still failing, the status becomes `COMPENSATION_FAILED`, and Prefect flags the saga as an orphan.
+- **Fault rule (station owner, on top of the SAGA)**: after the compensation of a failed `activate`, the gateway records a step `fault`.
+  - Stage 1: dispatch answered 503 `CHARGER_HARDWARE_FAULT` → reservation `fault` increments `fault_count`; the connector stays `AVAILABLE`.
+  - Stage 2: it closes `OUT_OF_SERVICE` at **3 consecutive** faults, or at once with `unreachable` (activate timed out or dispatch could not be reached).
+  - Reset: `reopen` (MAINTENANCE → AVAILABLE) clears the count; so does a successful `activate` (reserve returns `fault_count`, and only when it is > 0 the gateway sends `healthy`, step `healthy`).
+  - Idempotent: the count and the `SAGA#<id>/FAULT` marker are one `TransactWriteItems`, so a replay counts once.
 - **Crash recovery**: at gateway startup, sagas still `STARTED` after 60 s are compensated (ported from wandersync's `orders-billing/app.py` recovery).
 - **Idempotency**:
   - Every forward step and every compensation is keyed by `(sagaId, step)` through a DynamoDB conditional write, so a replayed request returns the first result and changes nothing.

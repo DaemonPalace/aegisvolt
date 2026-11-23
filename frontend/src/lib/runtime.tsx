@@ -5,7 +5,9 @@ import { ApolloProvider } from "@apollo/client/react";
 import { createContext, useCallback, useContext, useEffect, useState } from "react";
 
 // One build serves every env: the deploy writes /config.json = {apiUrl, env} next to the static files (SPEC §12).
-export type Config = { apiUrl: string; env: string };
+/** canary: written by deploy.yml while a canary is HELD (test env), removed by canary.yml on promote/rollback. */
+export type Canary = { tag: string; commit: string; services: string[]; since: string };
+export type Config = { apiUrl: string; env: string; canary?: Canary };
 
 const ConfigContext = createContext<Config>({ apiUrl: "", env: "" });
 export const useConfig = () => useContext(ConfigContext);

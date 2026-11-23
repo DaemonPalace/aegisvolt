@@ -5,7 +5,7 @@ import { useMutation, useQuery } from "@apollo/client/react";
 import { TokenForm } from "@/components/flags-panel";
 import { StateBadge } from "@/components/state-badge";
 import { clock, kwh, when } from "@/lib/format";
-import { ADD_CONNECTOR, LIFECYCLE, OWNER, REMOVE_CONNECTOR, type Connector, type Point, type Session, type Station } from "@/lib/gql";
+import { ADD_CONNECTOR, FAULTS, LIFECYCLE, OWNER, REMOVE_CONNECTOR, type Connector, type Point, type Session, type Station } from "@/lib/gql";
 import { adminToken, useConfig, useNow } from "@/lib/runtime";
 
 type Data = { stations: Station[]; stationSessions: Session[]; telemetry: Point[] };
@@ -28,6 +28,10 @@ export default function StationOwner() {
 
   const { data, previousData, error: loadError } = useQuery<Data>(OWNER, { variables: { stationId: stationId || "BOG-01", since }, pollInterval: 2000 });
   const d = data ?? previousData;
+  // errorPolicy "ignore": while a canary is held, 4 of 5 gateway pods are the previous version without faultCount.
+  const fq = useQuery<{ stations: { connectors: { id: string; faultCount: number | null }[] }[] }>(FAULTS, { pollInterval: 2000, errorPolicy: "ignore" });
+  const faults = fq.data ?? fq.previousData; // keep the last good answer when a poll lands on an old pod
+  const faultCount = (id: string) => faults?.stations.flatMap((st) => st.connectors).find((c) => c.id === id)?.faultCount ?? 0;
   const ctx = { context: { headers: { "X-Admin-Token": token } }, refetchQueries: [OWNER] };
   const [lifecycle, { loading: l1 }] = useMutation(LIFECYCLE, ctx);
   const [add, { loading: l2 }] = useMutation(ADD_CONNECTOR, ctx);
@@ -108,6 +112,7 @@ export default function StationOwner() {
                         <td>
                           <StateBadge state={c.status} />
                           {c.note && c.status !== "AVAILABLE" && <span className="sub wrap">{c.note}</span>}
+                          {c.status === "AVAILABLE" && !!faultCount(c.id) && <span className="sub wrap">{faultCount(c.id)} of 3 faults</span>}
                         </td>
                         <td>{c.status === "RESERVED" ? <strong>{current?.fleetId ?? "—"}</strong> : <span className="dash">—</span>}</td>
                         <td className="n num">{p ? <>{p.powerKw}<span className="unit">kW</span></> : <span className="dash">—</span>}</td>

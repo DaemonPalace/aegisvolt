@@ -149,17 +149,62 @@ def test_hardware_fault_refunds_then_releases_and_replay_changes_nothing(svc):
         assert asyncio.run(svc["saga"].call(service, "POST", path, body)).status_code == 200
     assert balance(svc, "FLEET-ANDINA") == before
 
-    # Station-owner rule on top of the SAGA: the faulty charger closes until maintenance reopens it.
-    assert [st["name"] for st in s["steps"]][-1] == "fault"
-    assert connector(svc, "MDE-01", "MDE-01-C1")["status"] == "OUT_OF_SERVICE"
-    life = lambda action: asyncio.run(svc["saga"].call("reservation", "POST", "/connectors/lifecycle", {
-        "station_id": "MDE-01", "connector_id": "MDE-01-C1", "action": action, "note": "swap the board"}))
-    assert life("reopen").status_code == 409  # must go through maintenance first
-    assert life("maintenance").json()["status"] == "MAINTENANCE"
+    # Stage 1 on top of the SAGA: the fault is counted, the connector stays AVAILABLE.
+    assert s["steps"][-1]["name"] == "fault" and "fault 1/3" in s["steps"][-1]["detail"]
+    c = connector(svc, "MDE-01", "MDE-01-C1")
+    assert c["status"] == "AVAILABLE" and c["fault_count"] == 1
+    # Replaying the fault record (same saga_id) counts nothing more.
+    again = life(svc, "MDE-01-C1", "fault", saga_id=s["id"]).json()
+    assert again["replay"] is True and again["fault_count"] == 1
+    assert connector(svc, "MDE-01", "MDE-01-C1")["fault_count"] == 1
+    life(svc, "MDE-01-C1", "healthy")  # leave it clean for the next test
+
+
+def life(svc, cid: str, action: str, **extra) -> httpx.Response:
+    return asyncio.run(svc["saga"].call("reservation", "POST", "/connectors/lifecycle", {
+        "station_id": cid.rsplit("-C", 1)[0], "connector_id": cid, "action": action, "note": "", **extra}))
+
+
+def faulty_saga(svc, cid: str) -> dict:
+    flag("SIMULATE_CHARGER_HARDWARE_FAULT", True)
+    try:
+        return run_saga(svc, "FLEET-ANDINA", cid.rsplit("-C", 1)[0], cid, 1)
+    finally:
+        flag("SIMULATE_CHARGER_HARDWARE_FAULT", False)
+
+
+def test_three_consecutive_faults_close_then_owner_reopen_resets(svc):
+    for n in (1, 2, 3):
+        s = faulty_saga(svc, "MDE-01-C1")
+        assert s["status"] == "COMPENSATED" and f"fault {n}/3" in s["steps"][-1]["detail"]
+        assert connector(svc, "MDE-01", "MDE-01-C1")["status"] == ("OUT_OF_SERVICE" if n == 3 else "AVAILABLE")
+    assert life(svc, "MDE-01-C1", "reopen").status_code == 409  # must go through maintenance first
+    assert life(svc, "MDE-01-C1", "maintenance", note="swap the board").json()["status"] == "MAINTENANCE"
     assert connector(svc, "MDE-01", "MDE-01-C1")["note"] == "swap the board"
-    assert life("maintenance").json()["replay"] is True
-    assert life("reopen").json()["status"] == "AVAILABLE"
-    assert connector(svc, "MDE-01", "MDE-01-C1")["status"] == "AVAILABLE"
+    assert life(svc, "MDE-01-C1", "maintenance").json()["replay"] is True
+    assert life(svc, "MDE-01-C1", "reopen").json()["status"] == "AVAILABLE"
+    c = connector(svc, "MDE-01", "MDE-01-C1")
+    assert c["status"] == "AVAILABLE" and c["fault_count"] == 0
+
+
+def test_successful_charge_resets_the_fault_count(svc):
+    assert "fault 1/3" in faulty_saga(svc, "BOG-01-C3")["steps"][-1]["detail"]
+    s = run_saga(svc, "FLEET-ANDINA", "BOG-01", "BOG-01-C3", 1)
+    assert s["status"] == "COMPLETED" and s["steps"][-1]["name"] == "healthy"
+    assert connector(svc, "BOG-01", "BOG-01-C3")["fault_count"] == 0
+    wire(svc)
+    asyncio.run(svc["saga"].stop(s["id"]))
+
+
+def test_unreachable_charger_closes_at_once(svc):
+    s = run_saga(svc, "FLEET-ANDINA", "CDMX-01", "CDMX-01-C2", 1,
+                 broken={"dispatch/activate": httpx.ConnectError("down")})
+    assert s["status"] == "COMPENSATED" and compensated(s) == ["charge", "reserve"]
+    assert "unreachable" in s["steps"][-1]["detail"]
+    assert connector(svc, "CDMX-01", "CDMX-01-C2")["status"] == "OUT_OF_SERVICE"
+    life(svc, "CDMX-01-C2", "maintenance")
+    life(svc, "CDMX-01-C2", "reopen")
+    assert life(svc, "CDMX-01-C2", "unreachable", saga_id=s["id"]).json()["status"] == "AVAILABLE"  # replay: no re-close
 
 
 def test_ultra_needs_boost_flag(svc):
@@ -176,6 +221,7 @@ def test_timeout_compensates_the_unknown_step_too(svc):
                  broken={"dispatch/activate": httpx.ReadTimeout("slow")})
     assert s["status"] == "COMPENSATED"
     assert compensated(s) == ["activate", "charge", "reserve"]
+    assert connector(svc, "MDE-01", "MDE-01-C2")["status"] == "OUT_OF_SERVICE"  # no answer = unreachable: closed at once
 
 
 def test_compensation_that_never_succeeds(svc):
