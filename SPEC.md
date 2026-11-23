@@ -9,7 +9,7 @@ Plan: stages S0–S7. Each stage ends with a manual review gate. Deadline: 2026-
 - S2 Services: done (PR #3). Local stack: `docker compose up -d --build --wait`; tests: `.venv/bin/pytest` (venv from `requirements-dev.txt`, Python 3.12)
 - S3 K8s/Canary: done (PR #5). Images: public `ghcr.io/daemonpalace/aegisvolt-<svc>:<sha7>`; `scripts/{build-push,deploy,canary}.sh`
 - S4 CI/CD: done (PR #6). 6 required checks (strict) on dev/test/prod; push to an env branch deploys that env
-- S5 Frontend: in review. Next.js static export on an S3 website per env (`web_url` output)
+- S5 Frontend: done (PRs #8, #9). Next.js static export on an S3 website per env (`web_url` output). Gate passed on dev: fault flag on, the charge compensated (activate failed, refund, release)
 - **Next: S6** (observability: Logs Insights by correlation_id, Prefect flows). Then S7 promotion + DEFENSE.md
 
 ## 0. Conventions
