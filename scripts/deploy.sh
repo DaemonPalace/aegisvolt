@@ -32,7 +32,12 @@ for row in gateway:graphql-gateway:sagas reservation:station-reservation-service
   cur=$(k get deploy "$SVC-stable" -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || true)
   stable_tag=${cur##*:}
   TRACK=stable REPLICAS=4 TAG=${stable_tag:-$NEW_TAG} envsubst <<<"$TEMPLATE" | k apply -f -
-  TRACK=canary REPLICAS=0 TAG=$NEW_TAG envsubst <<<"$TEMPLATE" | k apply -f -
+  # A HELD canary (test) survives deploys that don't touch this service: keep its replicas and tag.
+  # canary.sh resets it when the service itself changes.
+  can_rep=$(k get deploy "$SVC-canary" -o jsonpath='{.spec.replicas}' 2>/dev/null || true)
+  can_img=$(k get deploy "$SVC-canary" -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || true)
+  if [[ ${can_rep:-0} -gt 0 ]]; then CT=${can_img##*:}; CR=$can_rep; else CT=$NEW_TAG; CR=0; fi
+  TRACK=canary REPLICAS=$CR TAG=$CT envsubst <<<"$TEMPLATE" | k apply -f -
 done
 for d in $(k get deploy -l track=stable -o name); do k rollout status "$d" --timeout=300s; done  # old pods gone too
 k get deploy -o wide
