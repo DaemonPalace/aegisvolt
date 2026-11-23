@@ -1,6 +1,22 @@
 {
-  "local": {"api_url": "http://localhost:8080/graphql", "suffix": "local", "dynamodb_endpoint": "http://localhost:8000"},
-  "dev": {"api_url": "https://c2sp5wscqc.execute-api.us-east-1.amazonaws.com/dev/graphql", "suffix": "dev", "region": "us-east-1"},
-  "test": {"api_url": null, "suffix": "test", "region": "us-east-1"},
-  "prod": {"api_url": null, "suffix": "prod", "region": "us-east-1"}
+  "local": {
+    "api_url": "http://localhost:8080/graphql",
+    "suffix": "local",
+    "dynamodb_endpoint": "http://localhost:8000"
+  },
+  "dev": {
+    "api_url": "https://c2sp5wscqc.execute-api.us-east-1.amazonaws.com/dev/graphql",
+    "suffix": "dev",
+    "region": "us-east-1"
+  },
+  "test": {
+    "api_url": "https://gjk215wvea.execute-api.us-east-1.amazonaws.com/test/graphql",
+    "suffix": "test",
+    "region": "us-east-1"
+  },
+  "prod": {
+    "api_url": "https://l9ghril3o0.execute-api.us-east-1.amazonaws.com/prod/graphql",
+    "suffix": "prod",
+    "region": "us-east-1"
+  }
 }
