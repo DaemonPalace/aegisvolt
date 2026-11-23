@@ -1,7 +1,7 @@
 import { gql } from "@apollo/client";
 
 const SAGA_FIELDS = `id status fleetId stationId connectorId kwh amountCents createdAt powerKw endsAt steps { name status at detail }`;
-const STATION_FIELDS = `id name city connectors { id stationId type powerKw status sagaId note statusSince faultCount }`;
+const STATION_FIELDS = `id name city connectors { id stationId type powerKw status sagaId note statusSince }`;
 const WALLET_FIELDS = `fleetId balanceCents transactions { sagaId kind amountCents createdAt }`;
 
 /** The charge screen: stations to pick from, the price inputs, the flags, and the fleet's sagas and wallet. */
@@ -66,6 +66,11 @@ export const OWNER = gql`
     stationSessions(stationId: $stationId, since: $since) { sagaId connectorId fleetId status startedAt endedAt kwhRequested kwhDelivered powerKw }
     telemetry(stationId: $stationId) { connectorId sagaId ts powerKw energyKwh voltage }
   }
+`;
+
+/** Separate and optional: an older gateway (stable pods while a canary is held) has no faultCount field. */
+export const FAULTS = gql`
+  query Faults { stations { id connectors { id faultCount } } }
 `;
 
 export const LIFECYCLE = gql`
