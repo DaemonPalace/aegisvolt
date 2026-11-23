@@ -11,8 +11,8 @@ Plan: stages S0–S7. Each stage ends with a manual review gate. Deadline: 2026-
 - S4 CI/CD: done (PR #6). 6 required checks (strict) on dev/test/prod; push to an env branch deploys that env
 - S5 Frontend: in review. Next.js static export on an S3 website per env (`web_url` output)
 - UX redesign: done (PR #11). Tabs Charge / Transactions / Station owner. Charges end FINISHED at `endsAt`. Connectors go OUT_OF_SERVICE after a fault, then MAINTENANCE. Deposits and new fleets. `seed_local.py --reset`
-- S6 Observability: PR open. `scripts/trace.sh` and saved Logs Insights queries; `prefect/flows.py` (`env_health`, `saga_audit`) on a local Prefect server (compose profile `observability`)
-- **Next: S7** promotion + DEFENSE.md
+- S6 Observability: done (PR #12). `scripts/trace.sh` and saved Logs Insights queries; `prefect/flows.py` (`env_health`, `saga_audit`) on a local Prefect server (compose profile `observability`)
+- **S7 Integration: in progress.** `dev → test` merged (PR #13). `DEFENSE.md` and `scripts/demo.sh` added. Next: `test → prod`, then `demo.sh envs`
 
 ## 0. Conventions
 
