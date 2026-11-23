@@ -36,10 +36,12 @@ def test_scenario(flag, name, fleet, station, cid, kwh, flags, status, undo):
         assert stop(saga["id"])["status"] == "STOPPED"
     else:
         assert after["balanceCents"] == before  # charge refunded, or never taken
-    if "SIMULATE_CHARGER_HARDWARE_FAULT" in flags:  # the faulty charger stays closed until the owner reopens it
-        assert connector(station, cid)["status"] == "OUT_OF_SERVICE"
-        for action in ("maintenance", "reopen"):
+    if "SIMULATE_CHARGER_HARDWARE_FAULT" in flags:  # one fault is counted; the connector stays AVAILABLE
+        assert saga["steps"][-1]["name"] == "fault" and "fault 1/3" in saga["steps"][-1]["detail"]
+        assert connector(station, cid)["faultCount"] == 1
+        for action in ("maintenance", "reopen"):  # owner reset, so reruns start from 0
             lifecycle(station, cid, action)
+        assert connector(station, cid)["faultCount"] == 0
     assert connector(station, cid)["status"] == "AVAILABLE"
     if "charge" in undo:
         kinds = {t["kind"] for t in after["transactions"] if t["sagaId"] == saga["id"]}

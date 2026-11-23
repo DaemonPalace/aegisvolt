@@ -99,16 +99,21 @@ Before the defense:
    The saga ends `COMPENSATED`.
 4. What DynamoDB shows:
    - `aegisvolt-billing-test`: `TXN#<saga>#CHARGE` and `TXN#<saga>#REFUND` for the same amount, so the net is 0.
-   - `aegisvolt-reservations-test`: the markers `SAGA#<saga>/RESERVE` and `/RELEASE`.
+   - `aegisvolt-reservations-test`: the markers `SAGA#<saga>/RESERVE`, `/RELEASE` and `/FAULT`, and the connector `AVAILABLE` with `fault_count = 1`.
    - `aegisvolt-sagas-test`: the full step trail.
-5. **After** the compensation, an extra step `fault` takes the faulty connector `OUT_OF_SERVICE`. This is a station-owner rule we added: a charger that reported a hardware fault must not be booked again. It is not part of the compensation. The owner sends it to maintenance and reopens it from the Station owner tab (the script does it at the end).
+5. **After** the compensation, an extra step `fault` records the fault on the connector. This is a station-owner rule we added on top; it is not part of the compensation, which already left the connector **`AVAILABLE`** (src:93). Two stages:
+   - a hardware fault (503 `CHARGER_HARDWARE_FAULT`) is counted and the connector **stays `AVAILABLE`** (`fault 1/3`); the Station owner tab shows "1 of 3 faults";
+   - the connector goes `OUT_OF_SERVICE` at **3 consecutive** faults, or at once when the charger is **unreachable** (activate timed out or dispatch could not be reached).
+
+   The count resets when the owner reopens the connector (maintenance → reopen) and when a charge on it activates successfully. It is keyed by `sagaId` (marker `SAGA#<id>/FAULT` in the same transaction as the increment), so a replay counts once. The script resets the connector at the end with maintenance → reopen.
 6. **Insufficient funds** (src:94): `FLEET-LOWFUNDS` (5 USD) → `charge` 402 → only `reserve` is compensated → the connector is released immediately.
 
 ### "How does your SAGA avoid idempotency problems if a message or compensation request is processed twice?" (src:205)
 - **Markers.** Every step writes a marker keyed by `(sagaId, step)` with `attribute_not_exists` inside the same `TransactWriteItems` as the business change:
   - `/charge` = wallet update (`balance >= amount`) + `Put TXN#<saga>#CHARGE`;
   - `/refund` = `ConditionCheck` that CHARGE exists + `Put TXN#<saga>#REFUND` + wallet update;
-  - `/reserve` / `/release` = `SAGA#<id>/RESERVE|RELEASE` markers + a conditional update on the connector (`saga_id = :sid`).
+  - `/reserve` / `/release` = `SAGA#<id>/RESERVE|RELEASE` markers + a conditional update on the connector (`saga_id = :sid`);
+  - the fault rule = `SAGA#<id>/FAULT` marker + `fault_count + 1` on the connector.
 - **A duplicate.** It fails the marker condition, the transaction is cancelled as a whole, and the service answers with the **stored first result**. Money and connectors are not touched twice.
 - **Tombstones.** A `release` (or `stop`) that arrives *before* its forward call leaves a marker, so the late `reserve` is refused (410) and cannot orphan the connector.
 - **Client side.** `startCharge` takes an `idempotencyKey`. The same key returns the same saga and starts nothing. The UI sends one per click.
@@ -149,7 +154,7 @@ Before the defense:
 Next.js static export on one S3 website per env. `config.json`, written by the deploy, points the build at that env's API.
 - **Charge tab:** station → connector (UltraFast marked) → kWh with a live price (rate × kWh × surge). Then a live pop-up per charge, with a countdown until it is done or compensated.
 - **Transactions tab:** every saga expands to its orchestration flow and the money it moved.
-- **Station owner tab:** fault → maintenance → reopen, add/remove connectors, energy per session, connector, station and fleet.
+- **Station owner tab:** fault count (n of 3) → out of service → maintenance → reopen, add/remove connectors, energy per session, connector, station and fleet.
 
 ---
 

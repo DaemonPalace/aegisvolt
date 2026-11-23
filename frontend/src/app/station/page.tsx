@@ -108,6 +108,7 @@ export default function StationOwner() {
                         <td>
                           <StateBadge state={c.status} />
                           {c.note && c.status !== "AVAILABLE" && <span className="sub wrap">{c.note}</span>}
+                          {c.status === "AVAILABLE" && !!c.faultCount && <span className="sub wrap">{c.faultCount} of 3 faults</span>}
                         </td>
                         <td>{c.status === "RESERVED" ? <strong>{current?.fleetId ?? "—"}</strong> : <span className="dash">—</span>}</td>
                         <td className="n num">{p ? <>{p.powerKw}<span className="unit">kW</span></> : <span className="dash">—</span>}</td>
