@@ -1,0 +1,4 @@
+prefect==3.8.6
+fastapi==0.143.0  # prefect 3.8.6 server breaks on newer FastAPI (Body(min_items=...))
+boto3[crt]==1.44.9  # crt: the `aws login` credential provider (AWS_PROFILE=aegisvolt)
+httpx==0.28.1

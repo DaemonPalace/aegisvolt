@@ -1,0 +1,157 @@
+type ChargeSession {
+  sagaId: ID!
+  connectorId: ID!
+  fleetId: ID
+  status: String!
+  startedAt: String!
+  endedAt: String
+  kwhRequested: Float!
+  kwhDelivered: Float!
+  powerKw: Int!
+}
+
+type Connector {
+  id: ID!
+  stationId: ID!
+  type: ConnectorType!
+  powerKw: Int!
+  status: ConnectorStatus!
+  sagaId: ID
+  note: String
+  statusSince: String
+}
+
+enum ConnectorStatus {
+  AVAILABLE
+  RESERVED
+  OUT_OF_SERVICE
+  MAINTENANCE
+}
+
+enum ConnectorType {
+  FAST
+  ULTRA
+}
+
+type Flag {
+  name: String!
+  enabled: Boolean!
+  description: String
+  updatedAt: String
+}
+
+type Fleet {
+  fleetId: ID!
+  balanceCents: Int!
+}
+
+type Health {
+  env: String!
+  version: String!
+  services: [ServiceHealth!]!
+}
+
+type Mutation {
+  startCharge(input: StartChargeInput!): Saga!
+  stopCharge(sagaId: ID!): Saga!
+  setFlag(name: String!, enabled: Boolean!): Flag!
+  connectorLifecycle(stationId: ID!, connectorId: ID!, action: String!, note: String! = ""): [Station!]!
+  addConnector(stationId: ID!, type: ConnectorType!): [Station!]!
+  removeConnector(stationId: ID!, connectorId: ID!): [Station!]!
+  createFleet(fleetId: ID!, initialCents: Int! = 0): Wallet!
+  topUp(fleetId: ID!, amountCents: Int!): Wallet!
+}
+
+type Pricing {
+  rateCentsPerKwh: Int!
+  surgeMultiplier: Float!
+  surge: Boolean!
+}
+
+type Query {
+  stations: [Station!]!
+  telemetry(stationId: ID!): [TelemetryPoint!]!
+  flags: [Flag!]!
+  stationSessions(stationId: ID!, since: String!): [ChargeSession!]!
+  pricing: Pricing!
+  fleets: [Fleet!]!
+  wallet(fleetId: ID!): Wallet!
+  sagas(limit: Int! = 20): [Saga!]!
+  saga(id: ID!): Saga
+  health: Health!
+}
+
+type Saga {
+  id: ID!
+  status: SagaStatus!
+  fleetId: ID!
+  stationId: ID!
+  connectorId: ID!
+  kwh: Float!
+  amountCents: Int
+  createdAt: String!
+  steps: [SagaStep!]!
+  powerKw: Int
+  endsAt: String
+}
+
+enum SagaStatus {
+  STARTED
+  COMPLETED
+  FAILED
+  COMPENSATED
+  COMPENSATION_FAILED
+  STOPPED
+  FINISHED
+}
+
+type SagaStep {
+  name: String!
+  status: String!
+  at: String!
+  detail: String
+}
+
+type ServiceHealth {
+  service: String!
+  status: String!
+  version: String!
+}
+
+input StartChargeInput {
+  fleetId: ID!
+  stationId: ID!
+  connectorId: ID!
+  kwh: Float!
+  idempotencyKey: ID = null
+}
+
+type Station {
+  id: ID!
+  name: String!
+  city: String!
+  connectors: [Connector!]!
+}
+
+type TelemetryPoint {
+  stationId: ID!
+  connectorId: ID!
+  sagaId: ID!
+  ts: String!
+  powerKw: Float!
+  energyKwh: Float!
+  voltage: Float!
+}
+
+type Wallet {
+  fleetId: ID!
+  balanceCents: Int!
+  transactions: [WalletTxn!]!
+}
+
+type WalletTxn {
+  sagaId: ID
+  kind: String!
+  amountCents: Int!
+  createdAt: String!
+}
