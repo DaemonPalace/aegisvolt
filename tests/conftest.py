@@ -52,7 +52,7 @@ def lifecycle(station: str, cid: str, action: str) -> None:
 
 
 def connector(station: str, cid: str) -> dict:
-    st = next(s for s in gql("{ stations { id connectors { id status sagaId } } }")["stations"] if s["id"] == station)
+    st = next(s for s in gql("{ stations { id connectors { id status sagaId faultCount } } }")["stations"] if s["id"] == station)
     return next(c for c in st["connectors"] if c["id"] == cid)
 
 

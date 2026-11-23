@@ -5,7 +5,10 @@ Ported from wandersync services/common/participant.py (SQL → DynamoDB conditio
 - release before (or instead of) reserve leaves a RELEASE tombstone, and a later reserve for that
   saga is refused (410): a late, timed-out reserve can't leave an orphan booking.
 - a connector is held by at most one saga: conditional update on status = AVAILABLE.
-- station owner lifecycle: AVAILABLE → OUT_OF_SERVICE (hardware fault) → MAINTENANCE → AVAILABLE (reopen);
+- hardware faults are two-staged: each one is counted once per saga_id (marker SAGA#<id>/FAULT) and the connector
+  stays AVAILABLE; it closes OUT_OF_SERVICE at FAULT_THRESHOLD consecutive faults, or at once if the charger is
+  unreachable. reopen and a successful activation ("healthy") reset the count.
+- station owner lifecycle: AVAILABLE → OUT_OF_SERVICE (faults) → MAINTENANCE → AVAILABLE (reopen);
   connectors can be added or removed while nobody is charging on them.
 """
 import os
@@ -31,8 +34,9 @@ class Hold(BaseModel):
 class Lifecycle(BaseModel):
     station_id: str
     connector_id: str
-    action: str  # fault | maintenance | reopen
+    action: str  # fault | unreachable | healthy (from the SAGA) | maintenance | reopen (owner)
     note: str = Field(default="", max_length=300)
+    saga_id: str | None = None  # fault / unreachable: the idempotency key
 
 
 class NewConnector(BaseModel):
@@ -40,9 +44,9 @@ class NewConnector(BaseModel):
 
 
 POWER = {"FAST": 150, "ULTRA": 350}
+FAULT_THRESHOLD = 3  # consecutive hardware faults that close a connector
 # action → (statuses it may start from, status it leaves). RESERVED is never a source: a car is plugged in.
 TRANSITIONS = {
-    "fault": (("AVAILABLE",), "OUT_OF_SERVICE"),
     "maintenance": (("AVAILABLE", "OUT_OF_SERVICE"), "MAINTENANCE"),
     "reopen": (("MAINTENANCE",), "AVAILABLE"),
 }
@@ -73,6 +77,7 @@ def stations():
                 "id": it["sk"].removeprefix("CONNECTOR#"), "station_id": sid, "type": it["type"],
                 "power_kw": it["power_kw"], "status": it["status"], "saga_id": it.get("saga_id"),
                 "note": it.get("note"), "status_since": it.get("updated_at"),
+                "fault_count": it.get("fault_count", 0),
             })
     for st in out.values():
         st["connectors"].sort(key=lambda c: (len(c["id"]), c["id"]))  # C2 before C10
@@ -106,12 +111,14 @@ def reserve(body: Hold):
         if released:
             raise HTTPException(410, "ALREADY_RELEASED")
         if replay:
-            return {"status": "RESERVED", "replay": True, "power_kw": int(conn["power_kw"])}
+            return {"status": "RESERVED", "replay": True, "power_kw": int(conn["power_kw"]),
+                    "fault_count": int(conn.get("fault_count", 0))}
         if taken:
             raise HTTPException(409, "CONNECTOR_NOT_AVAILABLE")
         raise
     event("reservation.reserved", f"{body.connector_id} reserved")
-    return {"status": "RESERVED", "replay": False, "power_kw": int(conn["power_kw"])}
+    return {"status": "RESERVED", "replay": False, "power_kw": int(conn["power_kw"]),
+            "fault_count": int(conn.get("fault_count", 0))}
 
 
 @app.post("/release")
@@ -144,17 +151,76 @@ def release(body: Hold):
     return {"status": "AVAILABLE", "result": "released"}
 
 
+def record_fault(body: Lifecycle, key: dict) -> dict:
+    """Stage 1: count the fault once per saga; the connector stays AVAILABLE. Stage 2: close it OUT_OF_SERVICE
+    at FAULT_THRESHOLD consecutive faults, or at once when the charger did not answer at all (unreachable)."""
+    if not body.saga_id:
+        raise HTTPException(422, "SAGA_ID_REQUIRED")
+    replay = False
+    try:
+        ddb.client().transact_write_items(TransactItems=[
+            {"Put": {"TableName": TABLE, "ConditionExpression": "attribute_not_exists(pk)",
+                     "Item": {"pk": f"SAGA#{body.saga_id}", "sk": "FAULT", "connector_id": body.connector_id,
+                              "action": body.action, "at": now()}}},
+            {"Update": {"TableName": TABLE, "Key": key,
+                        "ConditionExpression": "attribute_exists(pk) AND #s = :free",
+                        "UpdateExpression": "SET fault_count = if_not_exists(fault_count, :zero) + :one, "
+                                            "last_fault_at = :now",
+                        "ExpressionAttributeNames": {"#s": "status"},
+                        "ExpressionAttributeValues": {":free": "AVAILABLE", ":zero": 0, ":one": 1, ":now": now()}}},
+        ])
+    except ClientError as exc:
+        replay, busy = ddb.cancel_reasons(exc)
+        if not (replay or busy):
+            raise
+        # replay: already counted. busy: not AVAILABLE (the owner closed it) or gone: nothing to count.
+    # A replay never re-closes for "unreachable" (the owner may have reopened it since); the threshold check is safe
+    # to repeat (reopen removes the count) and finishes a close that crashed after the count landed.
+    by_count = replay or body.action == "fault"
+    values = {":free": "AVAILABLE", ":out": "OUT_OF_SERVICE", ":now": now(),
+              ":note": body.note or ("charger unreachable" if body.action == "unreachable"
+                                     else f"{FAULT_THRESHOLD} consecutive hardware faults")}
+    if by_count:
+        values[":max"] = FAULT_THRESHOLD
+    try:
+        ddb.table(TABLE).update_item(Key=key, UpdateExpression="SET #s = :out, note = :note, updated_at = :now",
+                                     ConditionExpression="#s = :free" + (" AND fault_count >= :max" if by_count else ""),
+                                     ExpressionAttributeNames={"#s": "status"}, ExpressionAttributeValues=values)
+    except ClientError as exc:
+        if exc.response["Error"]["Code"] != "ConditionalCheckFailedException":
+            raise
+    current = ddb.table(TABLE).get_item(Key=key, ConsistentRead=True).get("Item")
+    if not current:
+        raise HTTPException(404, "CONNECTOR_NOT_FOUND")
+    out = {"status": current["status"], "fault_count": int(current.get("fault_count", 0)),
+           "threshold": FAULT_THRESHOLD, "replay": replay}
+    event(f"reservation.{body.action}",
+          f"{body.connector_id}: fault {out['fault_count']}/{FAULT_THRESHOLD}, {out['status']}")
+    return out
+
+
 @app.post("/connectors/lifecycle")
 def lifecycle(body: Lifecycle):
+    key = {"pk": f"STATION#{body.station_id}", "sk": f"CONNECTOR#{body.connector_id}"}
+    if body.action in ("fault", "unreachable"):
+        return record_fault(body, key)
+    if body.action == "healthy":  # the charger just activated: its fault streak is over (status unchanged)
+        try:
+            ddb.table(TABLE).update_item(Key=key, UpdateExpression="REMOVE fault_count, last_fault_at",
+                                         ConditionExpression="attribute_exists(pk)")
+        except ClientError as exc:
+            if exc.response["Error"]["Code"] == "ConditionalCheckFailedException":
+                raise HTTPException(404, "CONNECTOR_NOT_FOUND")
+            raise
+        return {"fault_count": 0}
     if body.action not in TRANSITIONS:
         raise HTTPException(422, f"UNKNOWN_ACTION {body.action}")
     sources, target = TRANSITIONS[body.action]
-    key = {"pk": f"STATION#{body.station_id}", "sk": f"CONNECTOR#{body.connector_id}"}
     names = {"#s": "status"}
     values = {":t": target, ":now": now(), **{f":s{i}": s for i, s in enumerate(sources)}}
     allowed = " OR ".join(f"#s = :s{i}" for i in range(len(sources)))
     if target == "AVAILABLE":
-        update = "SET #s = :t, updated_at = :now REMOVE note"
+        update = "SET #s = :t, updated_at = :now REMOVE note, fault_count, last_fault_at"  # reopen: fresh start
     else:
         update, values[":note"] = "SET #s = :t, updated_at = :now, note = :note", body.note or body.action
     try:

@@ -1,7 +1,7 @@
 import { gql } from "@apollo/client";
 
 const SAGA_FIELDS = `id status fleetId stationId connectorId kwh amountCents createdAt powerKw endsAt steps { name status at detail }`;
-const STATION_FIELDS = `id name city connectors { id stationId type powerKw status sagaId note statusSince }`;
+const STATION_FIELDS = `id name city connectors { id stationId type powerKw status sagaId note statusSince faultCount }`;
 const WALLET_FIELDS = `fleetId balanceCents transactions { sagaId kind amountCents createdAt }`;
 
 /** The charge screen: stations to pick from, the price inputs, the flags, and the fleet's sagas and wallet. */
@@ -97,7 +97,7 @@ export type Saga = {
 };
 export type Connector = {
   id: string; stationId: string; type: "FAST" | "ULTRA"; powerKw: number; status: string; sagaId: string | null;
-  note: string | null; statusSince: string | null;
+  note: string | null; statusSince: string | null; faultCount: number | null;
 };
 export type Session = {
   sagaId: string; connectorId: string; fleetId: string | null; status: string; startedAt: string; endedAt: string | null;

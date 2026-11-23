@@ -52,6 +52,7 @@ class Connector:
     saga_id: strawberry.ID | None
     note: str | None = None
     status_since: str | None = None
+    fault_count: int | None = None  # consecutive hardware faults; OUT_OF_SERVICE at 3
 
 
 @strawberry.type
@@ -218,7 +219,8 @@ class Query:
                         connectors=[Connector(id=c["id"], station_id=c["station_id"], type=ConnectorType(c["type"]),
                                               power_kw=c["power_kw"], status=ConnectorStatus(c["status"]),
                                               saga_id=c.get("saga_id"), note=c.get("note"),
-                                              status_since=c.get("status_since")) for c in s["connectors"]])
+                                              status_since=c.get("status_since"), fault_count=c.get("fault_count"))
+                                              for c in s["connectors"]])
                 for s in await get("reservation", "/stations")]
 
     @strawberry.field

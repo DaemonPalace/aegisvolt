@@ -93,7 +93,7 @@ saga() {
     [[ $s != STARTED ]] && break; sleep 1
   done
   gql "$env" 'mutation { setFlag(name: "SIMULATE_CHARGER_HARDWARE_FAULT", enabled: false) { name enabled } }' admin | jq -c .
-  h "6.3 The saga row: forward steps, then compensations in reverse order (charge → reserve), then the fault close"
+  h "6.3 The saga row: forward steps, then compensations in reverse order (charge → reserve), then the fault count"
   gql "$env" "{ saga(id: \"$id\") { status amountCents steps { name status detail } } }" | jq .data.saga
   h "6.3 DynamoDB, billing table: CHARGE and REFUND for this saga (net 0)"
   run aws dynamodb query --table-name "aegisvolt-billing-$env" --key-condition-expression 'pk = :p AND begins_with(sk, :s)' \
@@ -103,8 +103,8 @@ saga() {
   run aws dynamodb query --table-name "aegisvolt-reservations-$env" --key-condition-expression 'pk = :p' \
     --expression-attribute-values "{\":p\":{\"S\":\"SAGA#$id\"}}" --query 'Items[].[sk.S,at.S]' --output table
   run aws dynamodb get-item --table-name "aegisvolt-reservations-$env" \
-    --key '{"pk":{"S":"STATION#MDE-01"},"sk":{"S":"CONNECTOR#MDE-01-C2"}}' --query 'Item.[status.S,note.S]' --output text
-  echo "(released by the compensation; then closed OUT_OF_SERVICE by the fault rule until the owner reopens it)"
+    --key '{"pk":{"S":"STATION#MDE-01"},"sk":{"S":"CONNECTOR#MDE-01-C2"}}' --query 'Item.[status.S,fault_count.N]' --output text
+  echo "(released by the compensation: AVAILABLE, fault 1/3; it closes OUT_OF_SERVICE at 3 in a row or if the charger is unreachable)"
   h "6.3 Idempotency: the same idempotencyKey twice → one saga, one CHARGE"
   local key; key=$(cat /proc/sys/kernel/random/uuid)
   for _ in 1 2; do
@@ -115,11 +115,11 @@ saga() {
     --expression-attribute-values "{\":p\":{\"S\":\"FLEET#FLEET-ANDINA\"},\":s\":{\"S\":\"TXN#$key\"}}" --query 'Count'
   echo "Every participant writes a (sagaId, step) marker with attribute_not_exists: a replayed charge/refund/release"
   echo "hits the condition and returns the first result (services/*/app.py, test_participants_are_idempotent_and_tombstoned)."
-  h "6.3 Put the connector back in service (station owner: maintenance → reopen)"
+  h "6.3 Reset the fault count (station owner: maintenance → reopen)"
   for a in maintenance reopen; do
     gql "$env" "mutation { connectorLifecycle(stationId: \"MDE-01\", connectorId: \"MDE-01-C2\", action: \"$a\", note: \"demo\") { id } }" admin >/dev/null
   done
-  echo "MDE-01-C2 is AVAILABLE again"
+  echo "MDE-01-C2 is AVAILABLE with fault count 0"
   echo "$id" > /tmp/aegisvolt-last-failed-saga
 }
 
