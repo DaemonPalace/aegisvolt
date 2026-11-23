@@ -116,7 +116,7 @@ def reserve(body: Hold):
         if taken:
             raise HTTPException(409, "CONNECTOR_NOT_AVAILABLE")
         raise
-    event("reservation.reserved", f"{body.connector_id} reserved")
+    event("reservation.reserved", f"{body.connector_id} reserved at {body.station_id} ({int(conn['power_kw'])} kW)")
     return {"status": "RESERVED", "replay": False, "power_kw": int(conn["power_kw"]),
             "fault_count": int(conn.get("fault_count", 0))}
 
@@ -147,7 +147,7 @@ def release(body: Hold):
             if e.response["Error"]["Code"] != "ConditionalCheckFailedException":
                 raise
         return {"status": "AVAILABLE", "result": "tombstone"}
-    event("reservation.released", f"{body.connector_id} released")
+    event("reservation.released", f"{body.connector_id} released at {body.station_id}, back to AVAILABLE")
     return {"status": "AVAILABLE", "result": "released"}
 
 
