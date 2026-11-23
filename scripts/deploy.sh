@@ -13,10 +13,15 @@ ENV=$1 TAG=$2
   echo "SERVICES=\$(echo $(base64 -w0 k8s/services.yaml) | base64 -d)"
   cat <<'REMOTE'
 # A fresh node is still running user_data (k3s install, namespace, secret) when the first deploy arrives.
-for _ in $(seq 120); do
-  [[ -x /usr/local/bin/kubectl ]] && /usr/local/bin/kubectl -n aegisvolt get secret aegisvolt-secrets >/dev/null 2>&1 && break
-  sleep 5
-done
+ready() { [[ -x /usr/local/bin/kubectl ]] && /usr/local/bin/kubectl -n aegisvolt get secret aegisvolt-secrets >/dev/null 2>&1; }
+for _ in $(seq 36); do ready && break; sleep 5; done
+# On test and prod the first-boot k3s download failed (egress not ready yet) and user_data gave up.
+# Re-running the same bootstrap script once egress works repairs the node; it is a no-op path when k3s is fine.
+if ! ready && [[ -f /var/lib/cloud/instance/scripts/part-001 ]]; then
+  echo "node not bootstrapped after 3 min: re-running user_data"
+  bash /var/lib/cloud/instance/scripts/part-001 > /var/log/k3s-retry.log 2>&1 || tail -20 /var/log/k3s-retry.log
+fi
+for _ in $(seq 36); do ready && break; sleep 5; done
 export PATH=/usr/local/bin:$PATH
 k() { kubectl -n aegisvolt "$@"; }
 kubectl apply -f - <<<"$SERVICES"

@@ -83,6 +83,10 @@ Before the defense:
   - the smoke loop (50 × `/health`, each response counted by its `X-Version` header) gives the canary an error rate **< 5%**, with at least one hit;
   - the CloudWatch metric **`CanaryErrors` = 0** over the last 3 minutes. That metric comes from a filter on `{ $.level = "ERROR" && $.version = "canary" }`.
 - **If all hold:** stable moves to the new tag and the canary scales to 0. **Otherwise:** automatic rollback (canary to 0, stable untouched), and the job goes red.
+- **test holds its canary.** In `test`, `CANARY_MODE=hold`: after passing the gate the canary **stays at 20%**, and the web UI shows a "Canary <sha>" banner above the services list, linking to the commit.
+  - To finish it, run `gh workflow run canary.yml --ref test -f action=promote`. That re-runs the same gate, then goes to 100%.
+  - To abandon it, run `-f action=rollback`: the canary goes to 0 and stable is untouched.
+  - Either way the banner disappears. This lets the 20% → 100% step be shown live.
 
 ---
 
