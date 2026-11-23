@@ -64,7 +64,10 @@ jobs:
         run: |
           npm ci
           npm run build
-          jq -n --arg apiUrl "$API_URL" --arg env "$ENV" '{apiUrl: $apiUrl, env: $env}' > out/config.json
+          # keep the banner of a canary that is still held (canary.yml removes it on promote/rollback)
+          held=$(aws s3 cp "s3://$BUCKET/config.json" - 2>/dev/null | jq -c '.canary // null' || echo null)
+          jq -n --arg apiUrl "$API_URL" --arg env "$ENV" --argjson canary "${held:-null}" \
+            '{apiUrl: $apiUrl, env: $env} + (if $canary then {canary: $canary} else {} end)' > out/config.json
           aws s3 sync out "s3://$BUCKET" --delete
           aws s3 cp out/config.json "s3://$BUCKET/config.json" --cache-control no-store
       - name: Services whose image changed since the previous push

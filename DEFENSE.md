@@ -138,6 +138,8 @@ Before the defense:
   - The groups are `/aegisvolt/<env>/<service>`.
   - `scripts/trace.sh <env> --failed` lists the failed sagas. `scripts/trace.sh <env> <id>` prints that saga from all 4 services in order: reserve → charge → `dispatch.fault` → compensating → refund → release.
   - The same queries are saved in the console under Logs Insights: `aegisvolt-<env>-failed-sagas` and `aegisvolt-<env>-by-correlation`.
+  - Each line shows `version:image_tag` (for example `canary:a7f128e`), so while a canary is held you can tell which build handled each step.
+  - **From the web page:** Transactions tab → open a transaction → **Trace in CloudWatch**, which opens Logs Insights with this saga's `correlation_id` query over the env's 4 groups. **Copy query** copies the same text.
 
 ### "Change a flag in `dev` without redeploying and show the dev frontend change while prod stays the same" (src:210)
 `scripts/demo.sh flags`
