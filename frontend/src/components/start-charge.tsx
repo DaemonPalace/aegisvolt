@@ -24,7 +24,7 @@ export function StartCharge({ stations, boost, connector, onConnector, fleet, on
     setError("");
     const station = stations.find((s) => s.connectors.some((c) => c.id === connector));
     try {
-      await start({ variables: { input: { fleetId: fleet, stationId: station?.id, connectorId: connector, kwh: value, idempotencyKey: crypto.randomUUID() } } });
+      await start({ variables: { input: { fleetId: fleet, stationId: station?.id, connectorId: connector, kwh: value, idempotencyKey: newKey() } } });
       onConnector("");
     } catch (err) {
       setError((err as Error).message);
@@ -84,4 +84,14 @@ export function StartCharge({ stations, boost, connector, onConnector, fleet, on
       )}
     </section>
   );
+}
+
+// crypto.randomUUID exists only in secure contexts; the S3 website is plain HTTP. getRandomValues works on both.
+// The key becomes the saga id, so keep the uuid4 shape the gateway uses for its own ids.
+function newKey(): string {
+  const b = crypto.getRandomValues(new Uint8Array(16));
+  b[6] = (b[6] & 0x0f) | 0x40;
+  b[8] = (b[8] & 0x3f) | 0x80;
+  const h = Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
 }
