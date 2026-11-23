@@ -13,10 +13,15 @@ ENV=$1 TAG=$2
   echo "SERVICES=\$(echo $(base64 -w0 k8s/services.yaml) | base64 -d)"
   cat <<'REMOTE'
 # A fresh node is still running user_data (k3s install, namespace, secret) when the first deploy arrives.
-for _ in $(seq 120); do
-  [[ -x /usr/local/bin/kubectl ]] && /usr/local/bin/kubectl -n aegisvolt get secret aegisvolt-secrets >/dev/null 2>&1 && break
-  sleep 5
-done
+ready() { [[ -x /usr/local/bin/kubectl ]] && /usr/local/bin/kubectl -n aegisvolt get secret aegisvolt-secrets >/dev/null 2>&1; }
+for _ in $(seq 36); do ready && break; sleep 5; done
+# On test and prod the first-boot k3s download failed (egress not ready yet) and user_data gave up.
+# Re-running the same bootstrap script once egress works repairs the node; it is a no-op path when k3s is fine.
+if ! ready && [[ -f /var/lib/cloud/instance/scripts/part-001 ]]; then
+  echo "node not bootstrapped after 3 min: re-running user_data"
+  bash /var/lib/cloud/instance/scripts/part-001 > /var/log/k3s-retry.log 2>&1 || tail -20 /var/log/k3s-retry.log
+fi
+for _ in $(seq 36); do ready && break; sleep 5; done
 export PATH=/usr/local/bin:$PATH
 k() { kubectl -n aegisvolt "$@"; }
 kubectl apply -f - <<<"$SERVICES"
@@ -27,7 +32,12 @@ for row in gateway:graphql-gateway:sagas reservation:station-reservation-service
   cur=$(k get deploy "$SVC-stable" -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || true)
   stable_tag=${cur##*:}
   TRACK=stable REPLICAS=4 TAG=${stable_tag:-$NEW_TAG} envsubst <<<"$TEMPLATE" | k apply -f -
-  TRACK=canary REPLICAS=0 TAG=$NEW_TAG envsubst <<<"$TEMPLATE" | k apply -f -
+  # A HELD canary (test) survives deploys that don't touch this service: keep its replicas and tag.
+  # canary.sh resets it when the service itself changes.
+  can_rep=$(k get deploy "$SVC-canary" -o jsonpath='{.spec.replicas}' 2>/dev/null || true)
+  can_img=$(k get deploy "$SVC-canary" -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || true)
+  if [[ ${can_rep:-0} -gt 0 ]]; then CT=${can_img##*:}; CR=$can_rep; else CT=$NEW_TAG; CR=0; fi
+  TRACK=canary REPLICAS=$CR TAG=$CT envsubst <<<"$TEMPLATE" | k apply -f -
 done
 for d in $(k get deploy -l track=stable -o name); do k rollout status "$d" --timeout=300s; done  # old pods gone too
 k get deploy -o wide

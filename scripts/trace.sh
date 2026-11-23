@@ -14,7 +14,7 @@ if [[ $what == --failed ]]; then
 | sort @timestamp desc | limit 20'
 else
   [[ $what =~ ^[0-9a-f-]{36}$ ]] || { echo "not a saga id: $what" >&2; exit 2; }
-  query="fields @timestamp, service, level, event, msg
+  query="fields @timestamp, service, version, image_tag, level, event, msg
 | filter correlation_id = \"$what\"
 | sort @timestamp asc | limit 200"
 fi
@@ -30,4 +30,5 @@ for _ in $(seq 60); do
 done
 echo "Logs Insights query $id: $status" >&2
 jq -r '.results[] | map({(.field): .value}) | add
-  | [.["@timestamp"], (.service // .correlation_id), .level // "", .event, .msg] | @tsv' <<<"$out" | column -t -s $'\t'
+  | [.["@timestamp"], (.service // .correlation_id), (if .version then "\(.version):\(.image_tag)" else "" end),
+     .level // "", .event, .msg] | @tsv' <<<"$out" | column -t -s $'\t'

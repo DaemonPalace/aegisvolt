@@ -1,0 +1,51 @@
+# Promote or roll back a canary HELD by deploy.yml (CANARY_MODE=hold, i.e. the test env). Run it on the env's branch:
+#   gh workflow run canary.yml --ref test -f action=promote     (re-checks the gate, then 20% → 100%)
+#   gh workflow run canary.yml --ref test -f action=rollback    (canary to 0, stable untouched)
+name: canary
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: promote or rollback the held canary
+        type: choice
+        options: [promote, rollback]
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: deploy-${{ github.ref_name }}  # never alongside a deploy of the same env
+  cancel-in-progress: false
+
+env:
+  ENV: ${{ github.ref_name }}
+  AWS_REGION: us-east-1
+  DEPLOY_ROLE: arn:aws:iam::272973566676:role/aegisvolt-gha-deploy
+
+jobs:
+  canary:
+    if: contains(fromJSON('["dev","test","prod"]'), github.ref_name)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: { service: [gateway, reservation, billing, dispatch] }
+    steps:
+      - uses: actions/checkout@v7
+      - uses: aws-actions/configure-aws-credentials@v6
+        with: { role-to-assume: "${{ env.DEPLOY_ROLE }}", aws-region: "${{ env.AWS_REGION }}" }
+      - run: scripts/canary.sh "$ENV" ${{ matrix.service }} held ${{ inputs.action }}
+
+  banner:
+    needs: canary
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v6
+        with: { role-to-assume: "${{ env.DEPLOY_ROLE }}", aws-region: "${{ env.AWS_REGION }}" }
+      - name: Remove the canary banner when nothing is held any more
+        if: ${{ inputs.action == 'rollback' || needs.canary.result == 'success' }}
+        run: |
+          b="aegisvolt-web-$ENV-272973566676"
+          aws s3 cp "s3://$b/config.json" - | jq 'del(.canary)' \
+            | aws s3 cp - "s3://$b/config.json" --content-type application/json --cache-control no-store

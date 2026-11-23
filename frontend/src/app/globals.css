@@ -69,6 +69,10 @@ a { color: inherit; text-decoration: none; }
 .nav-item[aria-current="page"] { background: var(--active); color: var(--text); }
 .sidebar .bottom { margin-top: auto; display: grid; gap: 6px; padding: 0 8px; }
 .sidebar .bottom h2 { font-size: var(--fs-small); font-weight: 400; color: var(--muted); margin-bottom: 2px; }
+.canary { display: grid; grid-template-columns: auto 1fr; align-items: center; gap: 2px 8px; margin-bottom: 10px; padding: 8px; border: 1px solid #fde68a; border-radius: 8px; background: var(--pill-warning-bg); font-size: var(--fs-small); }
+.canary-tag { font-weight: 600; color: var(--pill-warning-ink); }
+.canary a { color: var(--text); text-decoration: underline; text-underline-offset: 2px; }
+.canary-sub { grid-column: 1 / -1; color: var(--muted); }
 .svc { display: flex; align-items: center; gap: 8px; font-size: var(--fs-small); }
 .svc .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--positive); flex: none; }
 .svc .dot.bad { background: var(--negative); }
@@ -208,7 +212,8 @@ tr.flow-row .flow { margin-top: 16px; padding: 16px; background: var(--surface);
 .flow-grid { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); gap: 24px; margin-top: 20px; }
 .flow-grid .table-wrap { margin: 0; padding: 0; }
 .flow td.detail { white-space: normal; color: var(--muted); max-width: 36ch; }
-.money .corr { margin-top: 12px; word-break: break-all; }
+.trace { margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--border); display: grid; gap: 6px; word-break: break-all; }
+.trace h3 { font-size: var(--fs-body); font-weight: 600; }
 
 /* ---------- station owner ---------- */
 .kpis { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--gap); margin-bottom: var(--gap); }

@@ -13,6 +13,8 @@ concurrency:
 
 env:
   ENV: ${{ github.ref_name }}
+  # test is the canary stage: its canary passes the gate and is then HELD at 20% until someone runs canary.yml.
+  CANARY_MODE: ${{ github.ref_name == 'test' && 'hold' || 'rollout' }}
   TF_VERSION: 1.17.1
   AWS_REGION: us-east-1
   DEPLOY_ROLE: arn:aws:iam::272973566676:role/aegisvolt-gha-deploy
@@ -26,6 +28,7 @@ jobs:
       services: ${{ steps.changed.outputs.services }}
       api_url: ${{ steps.apply.outputs.api_url }}
       web_url: ${{ steps.apply.outputs.web_url }}
+      web_bucket: ${{ steps.apply.outputs.web_bucket }}
     steps:
       - uses: actions/checkout@v7
         with: { fetch-depth: 0 }
@@ -61,7 +64,10 @@ jobs:
         run: |
           npm ci
           npm run build
-          jq -n --arg apiUrl "$API_URL" --arg env "$ENV" '{apiUrl: $apiUrl, env: $env}' > out/config.json
+          # keep the banner of a canary that is still held (canary.yml removes it on promote/rollback)
+          held=$(aws s3 cp "s3://$BUCKET/config.json" - 2>/dev/null | jq -c '.canary // null' || echo null)
+          jq -n --arg apiUrl "$API_URL" --arg env "$ENV" --argjson canary "${held:-null}" \
+            '{apiUrl: $apiUrl, env: $env} + (if $canary then {canary: $canary} else {} end)' > out/config.json
           aws s3 sync out "s3://$BUCKET" --delete
           aws s3 cp out/config.json "s3://$BUCKET/config.json" --cache-control no-store
       - name: Services whose image changed since the previous push
@@ -89,7 +95,18 @@ jobs:
       - uses: actions/checkout@v7
       - uses: aws-actions/configure-aws-credentials@v6
         with: { role-to-assume: "${{ env.DEPLOY_ROLE }}", aws-region: "${{ env.AWS_REGION }}" }
-      - run: scripts/canary.sh "$ENV" ${{ matrix.service }} ${{ needs.deploy.outputs.tag }}
+      - run: scripts/canary.sh "$ENV" ${{ matrix.service }} ${{ needs.deploy.outputs.tag }} "$CANARY_MODE"
+      - name: Canary banner in the env's config.json (the UI shows it above the services list)
+        if: env.CANARY_MODE == 'hold'
+        env:
+          BUCKET: ${{ needs.deploy.outputs.web_bucket }}
+          SERVICES: ${{ needs.deploy.outputs.services }}
+          TAG: ${{ needs.deploy.outputs.tag }}
+        run: |
+          aws s3 cp "s3://$BUCKET/config.json" - \
+            | jq --arg tag "$TAG" --arg commit "$GITHUB_SHA" --argjson services "$SERVICES" \
+                 '.canary = {tag: $tag, commit: $commit, services: $services, since: (now | todate)}' \
+            | aws s3 cp - "s3://$BUCKET/config.json" --content-type application/json --cache-control no-store
 
   smoke:
     needs: [deploy, canary]

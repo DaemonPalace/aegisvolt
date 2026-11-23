@@ -6,7 +6,7 @@ import { useEffect, useState } from "react";
 import { useQuery } from "@apollo/client/react";
 import { Toasts } from "@/components/toasts";
 import { FLEETS, HEALTH, type Health } from "@/lib/gql";
-import { useConfig, useFleet } from "@/lib/runtime";
+import { useConfig, useFleet, type Canary } from "@/lib/runtime";
 
 const SERVICE_SHORT: Record<string, string> = {
   "graphql-gateway": "Gateway",
@@ -34,7 +34,7 @@ const NAV = [
 ];
 
 export function Shell({ children }: { children: React.ReactNode }) {
-  const { env } = useConfig();
+  const { env, canary: canary0 } = useConfig();
   const { fleet, setFleet } = useFleet();
   const path = usePathname();
   const owner = path.startsWith("/station"); // the station owner has no fleet: no fleet picker, no charge pop-ups
@@ -79,6 +79,7 @@ export function Shell({ children }: { children: React.ReactNode }) {
           ))}
         </nav>
         <div className="bottom">
+          <CanaryBanner initial={canary0} />
           <h2>Services in {env}</h2>
           {services.length === 0 && <span className="stamp">Checking…</span>}
           {services.map((s) => (
@@ -108,6 +109,27 @@ export function Shell({ children }: { children: React.ReactNode }) {
       </header>
       <main className="sheet">{children}</main>
       {!owner && <Toasts />}
+    </div>
+  );
+}
+
+const REPO = "https://github.com/DaemonPalace/aegisvolt";
+
+/** A held canary (1 pod of 5 = 20% of traffic): which build, which services, link to its commit. Re-reads config.json every 30 s. */
+function CanaryBanner({ initial }: { initial?: Canary }) {
+  const [canary, setCanary] = useState(initial);
+  useEffect(() => {
+    const t = setInterval(() => {
+      fetch("/config.json", { cache: "no-store" }).then((r) => r.json()).then((c) => setCanary(c.canary)).catch(() => {});
+    }, 30_000);
+    return () => clearInterval(t);
+  }, []);
+  if (!canary) return null;
+  return (
+    <div className="canary">
+      <span className="canary-tag">Canary</span>
+      <a href={`${REPO}/commit/${canary.commit}`} target="_blank" rel="noreferrer" className="mono">{canary.tag}</a>
+      <span className="canary-sub">20% of traffic · {canary.services.join(", ")}</span>
     </div>
   );
 }

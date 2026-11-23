@@ -1,5 +1,9 @@
+"use client";
+
+import { useState } from "react";
 import { FORWARD, SagaTrack } from "@/components/saga-track";
-import { clock, money, secs } from "@/lib/format";
+import { clock, money, secs, traceQuery, traceUrl } from "@/lib/format";
+import { useConfig } from "@/lib/runtime";
 import type { Saga, Txn } from "@/lib/gql";
 
 const CLOSE: Record<string, string> = { stop: "Switch charger off", release: "Release connector" };
@@ -53,9 +57,41 @@ export function SagaFlow({ saga, moves, big }: { saga: Saga; moves: Txn[]; big?:
           {moves.length > 0 && (
             <div className="row"><strong className="grow">Net for the fleet</strong><strong className="n num">{net < 0 ? "−" : net > 0 ? "+" : ""}{money(Math.abs(net))}</strong></div>
           )}
-          <p className="meta corr">Correlation ID <span className="mono">{saga.id}</span></p>
+          <Trace sagaId={saga.id} failed={saga.steps.some((s) => s.status === "FAILED")} />
         </div>
       </div>
+    </div>
+  );
+}
+
+/** Every service logs this saga's id as correlation_id: open its trace in CloudWatch, or copy the query. */
+function Trace({ sagaId, failed }: { sagaId: string; failed: boolean }) {
+  const { env } = useConfig();
+  const [copied, setCopied] = useState(false);
+  const copy = () => {
+    // navigator.clipboard needs a secure context; the S3 website is plain HTTP, so fall back to a textarea.
+    const text = traceQuery(sagaId);
+    const done = () => { setCopied(true); setTimeout(() => setCopied(false), 1500); };
+    if (navigator.clipboard) { navigator.clipboard.writeText(text).then(done); return; }
+    const t = document.createElement("textarea"); t.value = text; document.body.appendChild(t); t.select();
+    document.execCommand("copy"); t.remove(); done();
+  };
+  return (
+    <div className="trace">
+      <h3>Trace</h3>
+      <p className="meta">Correlation ID <span className="mono">{sagaId}</span></p>
+      <p className="meta">
+        {failed ? "This saga failed: its logs show which service and which build (stable or canary) answered each step." :
+          "Every service logged this saga under the same correlation ID."}
+      </p>
+      {env === "local" ? (
+        <p className="meta">Local runs log to stdout only (docker compose logs).</p>
+      ) : (
+        <div className="token">
+          <a className="btn" href={traceUrl(env, sagaId)} target="_blank" rel="noreferrer">Trace in CloudWatch</a>
+          <button className="btn" onClick={copy}>{copied ? "Copied" : "Copy query"}</button>
+        </div>
+      )}
     </div>
   );
 }

@@ -68,6 +68,11 @@ export const OWNER = gql`
   }
 `;
 
+/** Separate and optional: an older gateway (stable pods while a canary is held) has no faultCount field. */
+export const FAULTS = gql`
+  query Faults { stations { id connectors { id faultCount } } }
+`;
+
 export const LIFECYCLE = gql`
   mutation Lifecycle($stationId: ID!, $connectorId: ID!, $action: String!, $note: String!) {
     connectorLifecycle(stationId: $stationId, connectorId: $connectorId, action: $action, note: $note) { ${STATION_FIELDS} }
@@ -97,7 +102,7 @@ export type Saga = {
 };
 export type Connector = {
   id: string; stationId: string; type: "FAST" | "ULTRA"; powerKw: number; status: string; sagaId: string | null;
-  note: string | null; statusSince: string | null;
+  note: string | null; statusSince: string | null; faultCount: number | null;
 };
 export type Session = {
   sagaId: string; connectorId: string; fleetId: string | null; status: string; startedAt: string; endedAt: string | null;
