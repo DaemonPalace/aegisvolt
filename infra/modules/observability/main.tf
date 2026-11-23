@@ -44,4 +44,16 @@ resource "aws_cloudwatch_query_definition" "by_correlation" {
   EOT
 }
 
+# Step one of a trace: which sagas failed or compensated, with the correlation_id to paste into by-correlation.
+resource "aws_cloudwatch_query_definition" "failed_sagas" {
+  name            = "aegisvolt-${var.env}-failed-sagas"
+  log_group_names = [for g in aws_cloudwatch_log_group.svc : g.name]
+  query_string    = <<-EOT
+    fields @timestamp, correlation_id, event, msg
+    | filter event in ["saga.compensated", "saga.compensation_failed", "saga.step.failed"]
+    | sort @timestamp desc
+    | limit 20
+  EOT
+}
+
 output "log_groups" { value = [for g in aws_cloudwatch_log_group.svc : g.name] }
