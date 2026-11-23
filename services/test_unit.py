@@ -148,6 +148,17 @@ def test_hardware_fault_refunds_then_releases_and_replay_changes_nothing(svc):
     for service, path in (("billing", "/refund"), ("reservation", "/release")):
         assert asyncio.run(svc["saga"].call(service, "POST", path, body)).status_code == 200
     assert balance(svc, "FLEET-ANDINA") == before
+
+    # Station-owner rule on top of the SAGA: the faulty charger closes until maintenance reopens it.
+    assert [st["name"] for st in s["steps"]][-1] == "fault"
+    assert connector(svc, "MDE-01", "MDE-01-C1")["status"] == "OUT_OF_SERVICE"
+    life = lambda action: asyncio.run(svc["saga"].call("reservation", "POST", "/connectors/lifecycle", {
+        "station_id": "MDE-01", "connector_id": "MDE-01-C1", "action": action, "note": "swap the board"}))
+    assert life("reopen").status_code == 409  # must go through maintenance first
+    assert life("maintenance").json()["status"] == "MAINTENANCE"
+    assert connector(svc, "MDE-01", "MDE-01-C1")["note"] == "swap the board"
+    assert life("maintenance").json()["replay"] is True
+    assert life("reopen").json()["status"] == "AVAILABLE"
     assert connector(svc, "MDE-01", "MDE-01-C1")["status"] == "AVAILABLE"
 
 
@@ -211,3 +222,54 @@ def test_graphql_admin_guard_and_idempotency_key(svc):
     assert allowed["data"]["setFlag"]["enabled"] is True
     assert a["data"]["startCharge"]["id"] == b["data"]["startCharge"]["id"] == "same-key"
     assert len(stations["data"]["stations"]) == 3
+
+
+def test_charge_finishes_by_itself_at_ends_at(svc):
+    async def go():
+        wire(svc)
+        s = await svc["saga"].start("FLEET-ANDINA", "CDMX-01", "CDMX-01-C2", 0.01)  # ~24 ms at 150 kW ×10
+        for _ in range(500):
+            s = await svc["saga"].load(s["id"])
+            if s["status"] not in ("STARTED", "COMPLETED"):
+                return s
+            await asyncio.sleep(0.01)
+        return s
+
+    s = asyncio.run(go())
+    assert s["status"] == "FINISHED", s
+    assert s["power_kw"] == 150 and s["ends_at"]
+    assert [st["name"] for st in s["steps"]] == ["reserve", "charge", "activate", "stop", "release"]
+    assert connector(svc, "CDMX-01", "CDMX-01-C2")["status"] == "AVAILABLE"
+
+
+def test_owner_adds_and_removes_connectors_and_reads_energy(svc):
+    wire(svc)
+    call = lambda method, path, body=None: asyncio.run(svc["saga"].call("reservation", method, path, body))
+    added = call("POST", "/stations/BOG-01/connectors", {"type": "ULTRA"}).json()
+    assert added == {"id": "BOG-01-C4", "type": "ULTRA", "power_kw": 350, "status": "AVAILABLE"}
+
+    s = run_saga(svc, "FLEET-ANDINA", "BOG-01", "BOG-01-C4", 3)
+    assert s["status"] == "COMPLETED" and s["power_kw"] == 350
+    assert call("DELETE", "/stations/BOG-01/connectors/BOG-01-C4").status_code == 409  # a car is plugged in
+
+    wire(svc)
+    asyncio.run(svc["saga"].stop(s["id"]))
+    sessions = asyncio.run(get(svc, "dispatch", f"/energy/BOG-01?since={s['created_at'][:10]}"))
+    mine = next(x for x in sessions if x["saga_id"] == s["id"])
+    assert mine["fleet_id"] == "FLEET-ANDINA" and mine["status"] == "STOPPED"
+    assert 0 <= mine["kwh_delivered"] < 3  # stopped early: only part of the 3 kWh went in
+
+    assert call("DELETE", "/stations/BOG-01/connectors/BOG-01-C4").json() == {"removed": "BOG-01-C4"}
+    assert all(c["id"] != "BOG-01-C4" for st in asyncio.run(get(svc, "reservation", "/stations")) for c in st["connectors"])
+
+
+def test_new_fleet_gets_a_wallet_and_can_charge(svc):
+    wire(svc)
+    call = lambda method, path, body=None: asyncio.run(svc["saga"].call("billing", method, path, body))
+    assert call("POST", "/wallets", {"fleet_id": "fleet lowercase"}).status_code == 422
+    made = call("POST", "/wallets", {"fleet_id": "FLEET-NORTE", "initial_cents": 2000}).json()
+    assert made["balance_cents"] == 2000 and [t["kind"] for t in made["transactions"]] == ["TOPUP"]
+    assert call("POST", "/wallets", {"fleet_id": "FLEET-NORTE"}).status_code == 409
+    assert "FLEET-NORTE" in [f["fleet_id"] for f in call("GET", "/wallets").json()]
+    s = run_saga(svc, "FLEET-NORTE", "BOG-01", "BOG-01-C3", 4)  # 4 kWh × 25 × 1.5 = 150 cents
+    assert s["status"] == "COMPLETED" and balance(svc, "FLEET-NORTE") == 1850

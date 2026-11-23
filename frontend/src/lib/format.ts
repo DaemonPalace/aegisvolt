@@ -23,3 +23,9 @@ export const FLAG_LABEL: Record<string, string> = {
   ENABLE_FAST_CHARGE_BOOST: "ULTRA connectors (fast-charge boost)",
   SIMULATE_CHARGER_HARDWARE_FAULT: "Simulate charger hardware fault",
 };
+
+/** "4:07" left, from milliseconds; "0:00" once past. */
+export const countdown = (ms: number) => {
+  const s = Math.max(0, Math.ceil(ms / 1000));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+};

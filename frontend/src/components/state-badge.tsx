@@ -3,11 +3,14 @@ const STYLES: Record<string, { cls: string; label: string }> = {
   STARTED: { cls: "run", label: "Running" },
   COMPLETED: { cls: "pos", label: "Charging" },
   STOPPED: { cls: "", label: "Stopped" },
+  FINISHED: { cls: "pos", label: "Charged" },
   FAILED: { cls: "neg", label: "Rejected" },
   COMPENSATED: { cls: "warn", label: "Compensated" },
   COMPENSATION_FAILED: { cls: "neg", label: "Compensation failed" },
   AVAILABLE: { cls: "pos", label: "Available" },
   RESERVED: { cls: "run", label: "In use" },
+  OUT_OF_SERVICE: { cls: "neg", label: "Out of service" },
+  MAINTENANCE: { cls: "warn", label: "Maintenance" },
   OK: { cls: "pos", label: "Done" },
 };
 

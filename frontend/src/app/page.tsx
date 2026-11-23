@@ -1,78 +1,54 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { useMutation, useQuery } from "@apollo/client/react";
+import { useQuery } from "@apollo/client/react";
+import { ChargeWizard } from "@/components/charge-wizard";
+import { Deposit, NewFleet } from "@/components/deposit";
 import { FlagsPanel } from "@/components/flags-panel";
-import { History } from "@/components/history";
-import { outcome } from "@/components/saga-track";
-import { StartCharge } from "@/components/start-charge";
-import { Stations } from "@/components/stations";
-import { clock } from "@/lib/format";
-import { CONSOLE, FLEETS, STOP_CHARGE, type Flag, type Health, type Saga, type Station, type Wallet } from "@/lib/gql";
-import { useConfig } from "@/lib/runtime";
+import { FleetSessions } from "@/components/fleet-sessions";
+import { money } from "@/lib/format";
+import { CHARGE, LIVE, type Flag, type Pricing, type Saga, type Station, type Wallet } from "@/lib/gql";
+import { useConfig, useFleet } from "@/lib/runtime";
 
-type Data = { health: Health; stations: Station[]; flags: Flag[]; sagas: Saga[]; wallet: Wallet };
+type Data = { stations: Station[]; flags: Flag[]; pricing: Pricing; sagas: Saga[]; wallet: Wallet };
 
-export default function Console() {
+export default function ChargePage() {
   const { env } = useConfig();
-  const [fleet, setFleet] = useState(FLEETS[0]);
-  const [connector, setConnector] = useState("");
-  const [stopping, setStopping] = useState<string | null>(null);
-  const { data, previousData, error, refetch } = useQuery<Data>(CONSOLE, { variables: { fleetId: fleet }, pollInterval: 2000 });
-  const [stop] = useMutation(STOP_CHARGE, { refetchQueries: [CONSOLE] });
+  const { fleet } = useFleet();
+  const { data, previousData, error } = useQuery<Data>(CHARGE, { variables: { fleetId: fleet }, pollInterval: 2000 });
   const d = data ?? previousData;
-  const [stamp, setStamp] = useState("");
-  useEffect(() => { if (data) setStamp(new Date().toISOString()); }, [data]);
 
-  const boost = d?.flags.find((f) => f.name === "ENABLE_FAST_CHARGE_BOOST")?.enabled ?? false;
-  const fault = d?.flags.find((f) => f.name === "SIMULATE_CHARGER_HARDWARE_FAULT")?.enabled ?? false;
-  const latest = d?.sagas[0];
-
-  const onStop = async (id: string) => {
-    setStopping(id);
-    try { await stop({ variables: { sagaId: id } }); } finally { setStopping(null); }
-  };
+  const on = (name: string) => d?.flags.find((f) => f.name === name)?.enabled ?? false;
+  const live = (d?.sagas ?? []).filter((s) => s.fleetId === fleet && LIVE.has(s.status));
 
   return (
     <>
       <div className="title-row">
         <div>
-          <h1>Charging console</h1>
+          <h1>Charge</h1>
           <p className="sub">
-            {latest ? <><strong>Last charge:</strong> {outcome(latest)}</> : "No charges yet in this environment."}
-            {fault && <> The hardware fault simulation is <strong>on</strong> in {env}: activation will fail and the saga will compensate.</>}
+            Pick a station, a connector and the energy; the price follows the amount and surge pricing.
+            {on("SIMULATE_CHARGER_HARDWARE_FAULT") && <> The hardware fault simulation is <strong>on</strong> in {env}: activation will fail and the charge will be refunded.</>}
           </p>
         </div>
-        <div className="actions">
-          <Freshness ok={!error} stamp={stamp} onRetry={() => refetch()} />
+        <div className="actions balance-chip">
+          <span className="meta">{fleet} balance</span>
+          <span className="kpi-value num">{d ? money(d.wallet.balanceCents) : "—"}</span>
         </div>
       </div>
       {error && !d && <p className="notice">Couldn&apos;t reach the {env} API ({error.message}). Retrying every 2 s.</p>}
       {d && (
-        <>
-          <div className="grid">
-            <div className="span-8 stack">
-              <Stations stations={d.stations} boost={boost} selected={connector} onPick={(c) => setConnector(c.id)} />
-              <History sagas={d.sagas} cap={6} onStop={onStop} stopping={stopping} />
-            </div>
-            <div className="span-4 stack side">
-              <StartCharge stations={d.stations} boost={boost} connector={connector} onConnector={setConnector}
-                fleet={fleet} onFleet={setFleet} fleets={FLEETS} latest={latest} balanceCents={d.wallet.balanceCents} />
-              <FlagsPanel flags={d.flags} />
-            </div>
+        <div className="grid">
+          <div className="span-8 stack">
+            <ChargeWizard stations={d.stations} sagas={d.sagas} boost={on("ENABLE_FAST_CHARGE_BOOST")} pricing={d.pricing} balanceCents={d.wallet.balanceCents} />
+            <FleetSessions sagas={live} stations={d.stations} />
           </div>
-        </>
+          <div className="span-4 stack side">
+            <Deposit wallet={d.wallet} />
+            <NewFleet />
+            <FlagsPanel flags={d.flags} />
+          </div>
+        </div>
       )}
-    </>
-  );
-}
-
-/** The time the last poll answered; on an error the old values stay and a Retry appears. */
-function Freshness({ ok, stamp, onRetry }: { ok: boolean; stamp: string; onRetry: () => void }) {
-  return (
-    <>
-      {stamp && <span className="stamp num">Updated {clock(stamp)} · every 2 s</span>}
-      {!ok && <button className="btn" onClick={onRetry}>Retry</button>}
     </>
   );
 }

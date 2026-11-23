@@ -13,3 +13,7 @@ dist/
 frontend/out/
 frontend/.next/
 frontend/tsconfig.tsbuildinfo
+
+# written by `next dev`
+frontend/AGENTS.md
+frontend/CLAUDE.md

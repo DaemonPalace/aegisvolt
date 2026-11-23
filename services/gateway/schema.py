@@ -4,6 +4,7 @@ import hmac
 import os
 from datetime import UTC, datetime
 from enum import Enum
+from urllib.parse import quote
 
 import saga as orchestrator
 import strawberry
@@ -26,6 +27,8 @@ class ConnectorType(Enum):
 class ConnectorStatus(Enum):
     AVAILABLE = "AVAILABLE"
     RESERVED = "RESERVED"
+    OUT_OF_SERVICE = "OUT_OF_SERVICE"
+    MAINTENANCE = "MAINTENANCE"
 
 
 @strawberry.enum
@@ -36,6 +39,7 @@ class SagaStatus(Enum):
     COMPENSATED = "COMPENSATED"
     COMPENSATION_FAILED = "COMPENSATION_FAILED"
     STOPPED = "STOPPED"
+    FINISHED = "FINISHED"
 
 
 @strawberry.type
@@ -46,6 +50,8 @@ class Connector:
     power_kw: int
     status: ConnectorStatus
     saga_id: strawberry.ID | None
+    note: str | None = None
+    status_since: str | None = None
 
 
 @strawberry.type
@@ -65,6 +71,19 @@ class TelemetryPoint:
     power_kw: float
     energy_kwh: float
     voltage: float
+
+
+@strawberry.type
+class ChargeSession:
+    saga_id: strawberry.ID
+    connector_id: strawberry.ID
+    fleet_id: strawberry.ID | None
+    status: str
+    started_at: str
+    ended_at: str | None
+    kwh_requested: float
+    kwh_delivered: float
+    power_kw: int
 
 
 @strawberry.type
@@ -91,6 +110,12 @@ class Wallet:
 
 
 @strawberry.type
+class Fleet:
+    fleet_id: strawberry.ID
+    balance_cents: int
+
+
+@strawberry.type
 class SagaStep:
     name: str
     status: str
@@ -109,6 +134,15 @@ class Saga:
     amount_cents: int | None
     created_at: str
     steps: list[SagaStep]
+    power_kw: int | None = None
+    ends_at: str | None = None
+
+
+@strawberry.type
+class Pricing:
+    rate_cents_per_kwh: int
+    surge_multiplier: float
+    surge: bool
 
 
 @strawberry.type
@@ -139,7 +173,8 @@ class StartChargeInput:
 def to_saga(s: dict) -> Saga:
     return Saga(id=s["id"], status=SagaStatus(s["status"]), fleet_id=s["fleet_id"], station_id=s["station_id"],
                 connector_id=s["connector_id"], kwh=float(s["kwh"]), amount_cents=s.get("amount_cents"),
-                created_at=s["created_at"], steps=[SagaStep(**st) for st in s["steps"]])
+                created_at=s["created_at"], steps=[SagaStep(**st) for st in s["steps"]],
+                power_kw=s.get("power_kw"), ends_at=s.get("ends_at"))
 
 
 def to_wallet(w: dict) -> Wallet:
@@ -159,6 +194,13 @@ async def get(service: str, path: str) -> dict | list:
     return resp.json()
 
 
+async def owner_call(method: str, path: str, body: dict | None = None) -> None:
+    resp = await orchestrator.call("reservation", method, path, body)
+    if resp.status_code != 200:
+        raise ValueError(resp.json().get("detail", resp.text[:200]) if resp.headers.get("content-type", "").startswith(
+            "application/json") else resp.text[:200])
+
+
 def require_admin(info: Info) -> None:
     expected = os.environ.get("ADMIN_TOKEN", "")
     given = info.context["request"].headers.get("x-admin-token", "")
@@ -175,7 +217,8 @@ class Query:
         return [Station(id=s["id"], name=s["name"], city=s["city"],
                         connectors=[Connector(id=c["id"], station_id=c["station_id"], type=ConnectorType(c["type"]),
                                               power_kw=c["power_kw"], status=ConnectorStatus(c["status"]),
-                                              saga_id=c.get("saga_id")) for c in s["connectors"]])
+                                              saga_id=c.get("saga_id"), note=c.get("note"),
+                                              status_since=c.get("status_since")) for c in s["connectors"]])
                 for s in await get("reservation", "/stations")]
 
     @strawberry.field
@@ -187,6 +230,20 @@ class Query:
     async def flags(self) -> list[Flag]:
         items = await asyncio.to_thread(lambda: ddb.table(FLAGS_TABLE).scan(ConsistentRead=True)["Items"])
         return sorted((to_flag(ddb.plain(i)) for i in items), key=lambda f: f.name)
+
+    @strawberry.field
+    async def station_sessions(self, station_id: strawberry.ID, since: str) -> list[ChargeSession]:
+        """Sessions started at the station since `since` (the UI sends its local midnight), with kWh delivered."""
+        datetime.fromisoformat(since)  # reject junk before it reaches a filter
+        return [ChargeSession(**p) for p in await get("dispatch", f"/energy/{station_id}?since={quote(since)}")]
+
+    @strawberry.field
+    async def pricing(self) -> Pricing:
+        return Pricing(**await get("billing", "/pricing"))
+
+    @strawberry.field
+    async def fleets(self) -> list[Fleet]:
+        return [Fleet(**f) for f in await get("billing", "/wallets")]
 
     @strawberry.field
     async def wallet(self, fleet_id: strawberry.ID) -> Wallet:
@@ -244,6 +301,41 @@ class Mutation:
                 raise ValueError(f"unknown flag {name}")
             raise
         return to_flag(ddb.plain(resp["Attributes"]))
+
+    @strawberry.mutation
+    async def connector_lifecycle(self, info: Info, station_id: strawberry.ID, connector_id: strawberry.ID,
+                                  action: str, note: str = "") -> list[Station]:
+        """Station owner: maintenance (from AVAILABLE or OUT_OF_SERVICE) or reopen (from MAINTENANCE)."""
+        require_admin(info)
+        if action not in ("maintenance", "reopen"):
+            raise ValueError("action must be maintenance or reopen")
+        await owner_call("POST", "/connectors/lifecycle", {"station_id": station_id, "connector_id": connector_id,
+                                                          "action": action, "note": note})
+        return await Query().stations()
+
+    @strawberry.mutation
+    async def add_connector(self, info: Info, station_id: strawberry.ID, type: ConnectorType) -> list[Station]:
+        require_admin(info)
+        await owner_call("POST", f"/stations/{station_id}/connectors", {"type": type.value})
+        return await Query().stations()
+
+    @strawberry.mutation
+    async def remove_connector(self, info: Info, station_id: strawberry.ID, connector_id: strawberry.ID) -> list[Station]:
+        require_admin(info)
+        await owner_call("DELETE", f"/stations/{station_id}/connectors/{connector_id}")
+        return await Query().stations()
+
+    @strawberry.mutation
+    async def create_fleet(self, info: Info, fleet_id: strawberry.ID, initial_cents: int = 0) -> Wallet:
+        require_admin(info)
+        resp = await orchestrator.call("billing", "POST", "/wallets", {"fleet_id": fleet_id, "initial_cents": initial_cents})
+        if resp.status_code == 409:
+            raise ValueError(f"{fleet_id} already exists")
+        if resp.status_code == 422:
+            raise ValueError("fleetId must look like FLEET-NAME (A-Z, 0-9, -), initialCents 0 to 1000000")
+        if resp.status_code != 200:
+            raise ValueError(f"billing: {resp.status_code} {resp.text[:200]}")
+        return to_wallet(resp.json())
 
     @strawberry.mutation
     async def top_up(self, info: Info, fleet_id: strawberry.ID, amount_cents: int) -> Wallet:

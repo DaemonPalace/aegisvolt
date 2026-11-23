@@ -7,7 +7,7 @@ import pytest
 
 API = os.environ.get("API_URL", "http://localhost:8080/graphql")
 ADMIN = os.environ.get("ADMIN_TOKEN", "local-admin")
-TERMINAL = {"COMPLETED", "FAILED", "COMPENSATED", "COMPENSATION_FAILED", "STOPPED"}
+TERMINAL = {"COMPLETED", "FAILED", "COMPENSATED", "COMPENSATION_FAILED", "STOPPED", "FINISHED"}
 
 
 def gql(query: str, variables: dict | None = None, admin: bool = False) -> dict:
@@ -44,6 +44,11 @@ def stop(saga_id: str) -> dict:
 
 def set_flag(name: str, on: bool) -> None:
     gql(f'mutation {{ setFlag(name: "{name}", enabled: {str(on).lower()}) {{ enabled }} }}', admin=True)
+
+
+def lifecycle(station: str, cid: str, action: str) -> None:
+    gql(f'mutation {{ connectorLifecycle(stationId: "{station}", connectorId: "{cid}", action: "{action}", '
+        f'note: "e2e") {{ id }} }}', admin=True)
 
 
 def connector(station: str, cid: str) -> dict:
