@@ -10,9 +10,16 @@ ENV=$1 TAG=$2
   echo "set -euo pipefail"
   echo "export ENV=$ENV NEW_TAG=$TAG REGISTRY=ghcr.io/${IMAGE_OWNER:-daemonpalace} CORS_ORIGINS='${CORS_ORIGINS:-}'"
   echo "TEMPLATE=\$(echo $(base64 -w0 k8s/deployment.yaml) | base64 -d)"
-  echo "kubectl apply -f <(echo $(base64 -w0 k8s/services.yaml) | base64 -d)"
+  echo "SERVICES=\$(echo $(base64 -w0 k8s/services.yaml) | base64 -d)"
   cat <<'REMOTE'
+# A fresh node is still running user_data (k3s install, namespace, secret) when the first deploy arrives.
+for _ in $(seq 120); do
+  [[ -x /usr/local/bin/kubectl ]] && /usr/local/bin/kubectl -n aegisvolt get secret aegisvolt-secrets >/dev/null 2>&1 && break
+  sleep 5
+done
+export PATH=/usr/local/bin:$PATH
 k() { kubectl -n aegisvolt "$@"; }
+kubectl apply -f - <<<"$SERVICES"
 for row in gateway:graphql-gateway:sagas reservation:station-reservation-service:reservations \
            billing:billing-wallet-service:billing dispatch:energy-dispatch-service:dispatch; do
   IFS=: read -r SVC SERVICE_NAME T <<<"$row"

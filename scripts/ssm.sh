@@ -15,10 +15,16 @@ ssm_run() {
   id=$(node_id "$1")
   [[ $id == i-* ]] || { echo "no running node for env $1" >&2; return 1; }
   b64=$(base64 -w0)
-  cmd=$(aws ssm send-command --instance-ids "$id" --document-name AWS-RunShellScript \
-    --timeout-seconds 60 \
-    --parameters "{\"commands\":[\"echo $b64 | base64 -d | bash\"],\"executionTimeout\":[\"$2\"]}" \
-    --query Command.CommandId --output text)
+  # A node launched seconds ago may not be registered with SSM yet (InvalidInstanceId): retry for up to 5 min.
+  for _ in $(seq 30); do
+    cmd=$(aws ssm send-command --instance-ids "$id" --document-name AWS-RunShellScript \
+      --timeout-seconds 60 \
+      --parameters "{\"commands\":[\"echo $b64 | base64 -d | bash\"],\"executionTimeout\":[\"$2\"]}" \
+      --query Command.CommandId --output text 2>/dev/null) && break
+    echo "node $id not reachable through SSM yet, retrying in 10 s" >&2
+    sleep 10
+  done
+  [[ -n ${cmd:-} ]] || { echo "SSM never accepted a command for $id" >&2; return 1; }
   while :; do
     sleep 5
     status=$(aws ssm get-command-invocation --command-id "$cmd" --instance-id "$id" --query Status --output text 2>/dev/null || echo Pending)
