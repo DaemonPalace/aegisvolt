@@ -212,7 +212,8 @@ tr.flow-row .flow { margin-top: 16px; padding: 16px; background: var(--surface);
 .flow-grid { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); gap: 24px; margin-top: 20px; }
 .flow-grid .table-wrap { margin: 0; padding: 0; }
 .flow td.detail { white-space: normal; color: var(--muted); max-width: 36ch; }
-.money .corr { margin-top: 12px; word-break: break-all; }
+.trace { margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--border); display: grid; gap: 6px; word-break: break-all; }
+.trace h3 { font-size: var(--fs-body); font-weight: 600; }
 
 /* ---------- station owner ---------- */
 .kpis { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--gap); margin-bottom: var(--gap); }

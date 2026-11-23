@@ -38,8 +38,14 @@ fi
 k rollout status deploy "$SVC-canary" --timeout=120s || rollback "canary pod not Ready in 120s"
 
 ip=$(k get svc "$SVC" -o jsonpath='{.spec.clusterIP}')
+# Ready is not routed yet: wait until the canary pod is a Service endpoint, then give kube-proxy a moment.
+# (gateway /health is so fast that 50 back-to-back calls once finished before the pod was in the rules: 0 hits.)
+pip=$(k get pod -l "app=$SVC,track=canary" -o jsonpath='{.items[0].status.podIP}')
+for _ in $(seq 30); do k get endpointslices -l "kubernetes.io/service-name=$SVC" -o jsonpath='{..addresses}' | grep -q "\"$pip\"" && break; sleep 2; done
+sleep 5
 hits=0 errs=0 stable=0
 for _ in $(seq 50); do
+  sleep 0.2
   read -r code ver < <(curl -s -o /dev/null --max-time 3 -w '%{http_code} %header{x-version}\n' "http://$ip/health")
   if [[ $ver == canary ]]; then hits=$((hits+1)); [[ $code == 200 ]] || errs=$((errs+1)); else stable=$((stable+1)); fi
 done
