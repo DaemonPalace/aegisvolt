@@ -130,8 +130,9 @@ def saga_audit(envs: list[str] | None = None) -> list[dict]:
 if __name__ == "__main__":
     mode, envs = (sys.argv[1] if len(sys.argv) > 1 else "run"), sys.argv[2:] or None
     if mode == "serve":
-        serve(env_health.to_deployment(name="scheduled", cron=CRON),
-              saga_audit.to_deployment(name="scheduled", cron=CRON))
+        params = {"envs": envs} if envs else {}  # serve dev test prod: skip "local" when its stack is down
+        serve(env_health.to_deployment(name="scheduled", cron=CRON, parameters=params),
+              saga_audit.to_deployment(name="scheduled", cron=CRON, parameters=params))
     else:
         for f in (env_health, saga_audit):
             try:

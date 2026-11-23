@@ -9,10 +9,11 @@ Plan: stages S0–S7. Each stage ends with a manual review gate. Deadline: 2026-
 - S2 Services: done (PR #3). Local stack: `docker compose up -d --build --wait`; tests: `.venv/bin/pytest` (venv from `requirements-dev.txt`, Python 3.12)
 - S3 K8s/Canary: done (PR #5). Images: public `ghcr.io/daemonpalace/aegisvolt-<svc>:<sha7>`; `scripts/{build-push,deploy,canary}.sh`
 - S4 CI/CD: done (PR #6). 6 required checks (strict) on dev/test/prod; push to an env branch deploys that env
-- S5 Frontend: in review. Next.js static export on an S3 website per env (`web_url` output)
+- S5 Frontend: done (PRs #8, #9). Next.js static export on an S3 website per env (`web_url` output)
 - UX redesign: done (PR #11). Tabs Charge / Transactions / Station owner. Charges end FINISHED at `endsAt`. Connectors go OUT_OF_SERVICE after 3 consecutive hardware faults (or at once if the charger is unreachable), then MAINTENANCE. Deposits and new fleets. `seed_local.py --reset`
 - S6 Observability: done (PR #12). `scripts/trace.sh` and saved Logs Insights queries; `prefect/flows.py` (`env_health`, `saga_audit`) on a local Prefect server (compose profile `observability`)
-- **S7 Integration: in progress.** `dev → test` merged (PR #13). `DEFENSE.md` and `scripts/demo.sh` added. Next: `test → prod`, then `demo.sh envs`
+- **S7 Integration: in progress.** All 3 envs live (`dev → test` #13, #22; `test → prod`). `DEFENSE.md` and `scripts/demo.sh` (#14). Two-stage hardware fault handling (#20). Held canary (#21, #23): `CANARY_MODE=hold` on test, banner from `config.json.canary`, promote or roll back with `gh workflow run canary.yml --ref test -f action=promote|rollback`. `deploy.sh` self-heals a failed k3s first boot. `trace.sh` shows a version column; each transaction links to its CloudWatch trace (#23).
+  - Next: promote the test canary, `test → prod` (brings #20–#23), `demo.sh envs`, run the demo sections on test and prod. After the defense: destroy test and prod
 
 ## 0. Conventions
 
@@ -385,7 +386,9 @@ type Mutation {
 - **Saga track**: the saga page draws the forward steps left to right and the compensations right to left underneath, so the reverse order is visible.
 - `ponytail:` it polls instead of using WSS. The diagram's `HTTPS / WSS` means HTTPS is required and WSS is optional. API Gateway REST APIs can't carry WebSockets; WSS would need a separate API Gateway WebSocket API. Add one only if "real time" is challenged.
 
-## 13. Prefect (`prefect/flows.py`, Prefect 3.8.6, Prefect Cloud free workspace)
+## 13. Prefect (`prefect/flows.py`, Prefect 3.8.6, local self-hosted server)
+
+- **Where it runs**: on the operator's machine, not in any env. The server and UI are the `prefect-server` compose service (profile `observability`, UI on http://localhost:4200). The flows run as a local process: `PREFECT_API_URL=http://localhost:4200/api prefect/.venv/bin/python prefect/flows.py serve dev test prod` (no env args = every env in `envs.json`, including `local`). From there they reach every env over its public API Gateway URL and read its DynamoDB tables with the operator's AWS credentials. Nothing Prefect-related is deployed to k3s or Terraform.
 
 - Prefect **observes**; it does not run the SAGA (§6).
 - Donor patterns:
