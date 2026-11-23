@@ -68,6 +68,10 @@ module "k3s" {
   sg_id         = module.network.node_sg_id
   account_id    = data.aws_caller_identity.me.account_id
   boundary_arn  = "arn:aws:iam::${data.aws_caller_identity.me.account_id}:policy/exam-aegisvolt-boundary"
+
+  # user_data downloads k3s on first boot: the private subnet's NAT route must exist before the node starts.
+  # Without this the first test node booted too early, the k3s download timed out, and kubectl never appeared.
+  depends_on = [module.network]
 }
 
 module "apigw" {
