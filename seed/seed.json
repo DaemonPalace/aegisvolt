@@ -10,7 +10,7 @@
     { "suffix": "C3", "type": "ULTRA", "power_kw": 350 }
   ],
   "fleets": [
-    { "id": "FLEET-ACME", "balance_cents": 50000 },
+    { "id": "FLEET-ANDINA", "balance_cents": 50000 },
     { "id": "FLEET-LOWFUNDS", "balance_cents": 500 }
   ],
   "flags": {

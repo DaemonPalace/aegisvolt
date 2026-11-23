@@ -108,11 +108,11 @@ def test_price_rounds_up_and_applies_surge(svc):
 
 
 def test_happy_path_then_stop(svc):
-    before = balance(svc, "FLEET-ACME")
-    s = run_saga(svc, "FLEET-ACME", "BOG-01", "BOG-01-C1", 10)
+    before = balance(svc, "FLEET-ANDINA")
+    s = run_saga(svc, "FLEET-ANDINA", "BOG-01", "BOG-01-C1", 10)
     assert s["status"] == "COMPLETED", s
     assert [st["name"] for st in s["steps"]] == ["reserve", "charge", "activate"]
-    assert s["amount_cents"] == 375 and balance(svc, "FLEET-ACME") == before - 375
+    assert s["amount_cents"] == 375 and balance(svc, "FLEET-ANDINA") == before - 375
     assert connector(svc, "BOG-01", "BOG-01-C1")["saga_id"] == s["id"]
 
     wire(svc)
@@ -130,45 +130,45 @@ def test_low_funds_releases_connector(svc):
 
 
 def test_hardware_fault_refunds_then_releases_and_replay_changes_nothing(svc):
-    before = balance(svc, "FLEET-ACME")
+    before = balance(svc, "FLEET-ANDINA")
     flag("SIMULATE_CHARGER_HARDWARE_FAULT", True)
     try:
-        s = run_saga(svc, "FLEET-ACME", "MDE-01", "MDE-01-C1", 10)
+        s = run_saga(svc, "FLEET-ANDINA", "MDE-01", "MDE-01-C1", 10)
     finally:
         flag("SIMULATE_CHARGER_HARDWARE_FAULT", False)
     assert s["status"] == "COMPENSATED"
     assert compensated(s) == ["charge", "reserve"]  # reverse order
-    kinds = [t["kind"] for t in asyncio.run(get(svc, "billing", "/wallets/FLEET-ACME"))["transactions"]]
+    kinds = [t["kind"] for t in asyncio.run(get(svc, "billing", "/wallets/FLEET-ANDINA"))["transactions"]]
     assert "REFUND" in kinds
-    assert balance(svc, "FLEET-ACME") == before
+    assert balance(svc, "FLEET-ANDINA") == before
 
     # Replay both compensations: nothing moves.
-    body = {"saga_id": s["id"], "fleet_id": "FLEET-ACME", "station_id": "MDE-01", "connector_id": "MDE-01-C1"}
+    body = {"saga_id": s["id"], "fleet_id": "FLEET-ANDINA", "station_id": "MDE-01", "connector_id": "MDE-01-C1"}
     wire(svc)
     for service, path in (("billing", "/refund"), ("reservation", "/release")):
         assert asyncio.run(svc["saga"].call(service, "POST", path, body)).status_code == 200
-    assert balance(svc, "FLEET-ACME") == before
+    assert balance(svc, "FLEET-ANDINA") == before
     assert connector(svc, "MDE-01", "MDE-01-C1")["status"] == "AVAILABLE"
 
 
 def test_ultra_needs_boost_flag(svc):
     flag("ENABLE_FAST_CHARGE_BOOST", False)
     try:
-        s = run_saga(svc, "FLEET-ACME", "CDMX-01", "CDMX-01-C3", 5)
+        s = run_saga(svc, "FLEET-ANDINA", "CDMX-01", "CDMX-01-C3", 5)
     finally:
         flag("ENABLE_FAST_CHARGE_BOOST", True)
     assert s["status"] == "FAILED" and compensated(s) == []  # step 1 refused: nothing to undo
 
 
 def test_timeout_compensates_the_unknown_step_too(svc):
-    s = run_saga(svc, "FLEET-ACME", "MDE-01", "MDE-01-C2", 1,
+    s = run_saga(svc, "FLEET-ANDINA", "MDE-01", "MDE-01-C2", 1,
                  broken={"dispatch/activate": httpx.ReadTimeout("slow")})
     assert s["status"] == "COMPENSATED"
     assert compensated(s) == ["activate", "charge", "reserve"]
 
 
 def test_compensation_that_never_succeeds(svc):
-    s = run_saga(svc, "FLEET-ACME", "CDMX-01", "CDMX-01-C1", 1,
+    s = run_saga(svc, "FLEET-ANDINA", "CDMX-01", "CDMX-01-C1", 1,
                  broken={"dispatch/activate": 503, "billing/refund": 500})
     assert s["status"] == "COMPENSATION_FAILED"
     assert compensated(s) == ["reserve"]  # the other compensations still ran
@@ -181,11 +181,11 @@ def test_participants_are_idempotent_and_tombstoned(svc):
     assert call("reservation", "/release", hold).json()["result"] == "tombstone"
     assert call("reservation", "/reserve", hold).status_code == 410  # late reserve can't orphan the connector
 
-    before = balance(svc, "FLEET-ACME")
-    charge = {"saga_id": "s-dup", "fleet_id": "FLEET-ACME", "kwh": 2}
+    before = balance(svc, "FLEET-ANDINA")
+    charge = {"saga_id": "s-dup", "fleet_id": "FLEET-ANDINA", "kwh": 2}
     first, again = call("billing", "/charge", charge).json(), call("billing", "/charge", charge).json()
     assert first["amount_cents"] == again["amount_cents"] and again["replay"] is True
-    assert balance(svc, "FLEET-ACME") == before - first["amount_cents"]
+    assert balance(svc, "FLEET-ANDINA") == before - first["amount_cents"]
 
 
 def test_graphql_admin_guard_and_idempotency_key(svc):
@@ -199,7 +199,7 @@ def test_graphql_admin_guard_and_idempotency_key(svc):
         denied = await gql('mutation { setFlag(name: "ENABLE_FAST_CHARGE_BOOST", enabled: true) { enabled } }')
         allowed = await gql('mutation { setFlag(name: "ENABLE_FAST_CHARGE_BOOST", enabled: true) { enabled } }',
                             {"X-Admin-Token": "t0ken"})
-        start = ('mutation { startCharge(input: {fleetId: "FLEET-ACME", stationId: "BOG-01", connectorId: "BOG-01-C2",'
+        start = ('mutation { startCharge(input: {fleetId: "FLEET-ANDINA", stationId: "BOG-01", connectorId: "BOG-01-C2",'
                  ' kwh: 1, idempotencyKey: "same-key"}) { id } }')
         a, b = await gql(start), await gql(start)
         await asyncio.gather(*svc["saga"]._running)

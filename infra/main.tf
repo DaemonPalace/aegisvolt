@@ -78,7 +78,15 @@ module "apigw" {
   instance_id = module.k3s.instance_id
 }
 
+module "web" {
+  source     = "./modules/web"
+  env        = local.env
+  account_id = data.aws_caller_identity.me.account_id
+}
+
 output "api_url" { value = module.apigw.api_url }
+output "web_url" { value = module.web.web_url }
+output "web_bucket" { value = module.web.bucket }
 output "nlb_arn" { value = module.apigw.nlb_arn }
 output "instance_id" { value = module.k3s.instance_id }
 output "tables" { value = module.data.tables }

@@ -25,6 +25,7 @@ jobs:
       tag: ${{ steps.tag.outputs.tag }}
       services: ${{ steps.changed.outputs.services }}
       api_url: ${{ steps.apply.outputs.api_url }}
+      web_url: ${{ steps.apply.outputs.web_url }}
     steps:
       - uses: actions/checkout@v7
         with: { fetch-depth: 0 }
@@ -41,11 +42,28 @@ jobs:
           terraform init -input=false
           terraform workspace select "$ENV"
           terraform apply -auto-approve -input=false -lock-timeout=120s
-          echo "api_url=$(terraform output -raw api_url)" >> "$GITHUB_OUTPUT"
+          { echo "api_url=$(terraform output -raw api_url)"
+            echo "web_url=$(terraform output -raw web_url)"
+            echo "web_bucket=$(terraform output -raw web_bucket)"; } >> "$GITHUB_OUTPUT"
       - uses: docker/login-action@v4
         with: { registry: ghcr.io, username: "${{ github.actor }}", password: "${{ github.token }}" }
       - run: scripts/build-push.sh ${{ steps.tag.outputs.tag }}
-      - run: scripts/deploy.sh "$ENV" ${{ steps.tag.outputs.tag }}
+      - name: deploy.sh (the gateway allows the env's web origin)
+        env: { CORS_ORIGINS: "${{ steps.apply.outputs.web_url }}" }
+        run: scripts/deploy.sh "$ENV" ${{ steps.tag.outputs.tag }}
+      - uses: actions/setup-node@v7
+        with: { node-version: "22", cache: npm, cache-dependency-path: frontend/package-lock.json }
+      - name: Frontend → the env's S3 website (one build; config.json picks the API)
+        working-directory: frontend
+        env:
+          API_URL: ${{ steps.apply.outputs.api_url }}
+          BUCKET: ${{ steps.apply.outputs.web_bucket }}
+        run: |
+          npm ci
+          npm run build
+          jq -n --arg apiUrl "$API_URL" --arg env "$ENV" '{apiUrl: $apiUrl, env: $env}' > out/config.json
+          aws s3 sync out "s3://$BUCKET" --delete
+          aws s3 cp out/config.json "s3://$BUCKET/config.json" --cache-control no-store
       - name: Services whose image changed since the previous push
         id: changed
         env: { BEFORE: "${{ github.event.before }}" }
@@ -85,3 +103,6 @@ jobs:
             -d '{"query":"{ health { env services { service status version } } }"}')
           echo "$out"
           jq -e --arg env "$ENV" '.data.health.env == $env and ([.data.health.services[].status] | all(. == "ok"))' <<<"$out"
+      - name: Web UI serves its env's config
+        env: { WEB_URL: "${{ needs.deploy.outputs.web_url }}" }
+        run: curl -sf -m 20 "$WEB_URL/config.json" | jq -e --arg env "$ENV" '.env == $env' 

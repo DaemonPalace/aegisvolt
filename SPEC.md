@@ -8,7 +8,9 @@ Plan: stages S0–S7. Each stage ends with a manual review gate. Deadline: 2026-
 - S1 Infra: done, dev applied (PR #2). Node `i-0ac341dfa40ce9367`, api_url `https://c2sp5wscqc.execute-api.us-east-1.amazonaws.com/dev/graphql`
 - S2 Services: done (PR #3). Local stack: `docker compose up -d --build --wait`; tests: `.venv/bin/pytest` (venv from `requirements-dev.txt`, Python 3.12)
 - S3 K8s/Canary: done (PR #5). Images: public `ghcr.io/daemonpalace/aegisvolt-<svc>:<sha7>`; `scripts/{build-push,deploy,canary}.sh`
-- **Next: S4** (`pr.yml`, `deploy.yml`, required checks). Then S5 frontend, S6 observability, S7 promotion + DEFENSE.md
+- S4 CI/CD: done (PR #6). 6 required checks (strict) on dev/test/prod; push to an env branch deploys that env
+- S5 Frontend: in review. Next.js static export on an S3 website per env (`web_url` output)
+- **Next: S6** (observability: Logs Insights by correlation_id, Prefect flows). Then S7 promotion + DEFENSE.md
 
 ## 0. Conventions
 
@@ -60,7 +62,7 @@ Connector ids: `<station>-C1` and `<station>-C2` are FAST, `<station>-C3` is ULT
 
 | fleetId | initial balance (cents) | purpose |
 |---|---|---|
-| `FLEET-ACME` | 50000 | happy path |
+| `FLEET-ANDINA` | 50000 | happy path |
 | `FLEET-LOWFUNDS` | 500 | step-2 failure demo (use kwh ≥ 14: 20 kWh with surge = 750 cents) |
 
 **Pricing**: base rate is 25 cents/kWh. Surge multiplier is ×1.5. `amount = ceil(kwh × 25 × multiplier)`.
@@ -370,7 +372,9 @@ type Mutation {
   2. **Start charge**: a form calling `startCharge`. It links to `/saga?id=<sagaId>`, the timeline page ported from wandersync `reservas/[id]/page.tsx`, which shows forward steps and compensations in reverse order. It becomes a query-param page because static export can't serve dynamic routes.
   3. **Feature flags**: `flags-panel.tsx`, ported from Taller-PatronSaga `dev-drawer.tsx` (Switch toggles). `setFlag` uses an admin token kept in `localStorage`.
   4. **Saga history**: `sagas(limit:20)` with status badges, plus wallet balance and transactions.
-- **Hosting**: decided in S5. Either an S3 static website, if the account allows public buckets, or an nginx pod behind the same API Gateway.
+- **Hosting** (decided in S5): an S3 static website per env, `aegisvolt-web-<env>-<account>` (module `web`, output `web_url`). The account accepts the public-read bucket policy. The gateway's `CORS_ORIGINS` is set to that env's `web_url` by `deploy.yml`.
+- **Styling** (changed in S5): plain CSS with design tokens (taste-skill app sheet "framed sheet", IBM Plex Sans + Plex Mono for IDs) instead of Tailwind/shadcn. Only Apollo, the formatters, the state badge, the flag switches and the saga page logic are ported from the donors.
+- **Saga track**: the saga page draws the forward steps left to right and the compensations right to left underneath, so the reverse order is visible.
 - `ponytail:` it polls instead of using WSS. The diagram's `HTTPS / WSS` means HTTPS is required and WSS is optional. API Gateway REST APIs can't carry WebSockets; WSS would need a separate API Gateway WebSocket API. Add one only if "real time" is challenged.
 
 ## 13. Prefect (`prefect/flows.py`, Prefect 3.8.6, Prefect Cloud free workspace)

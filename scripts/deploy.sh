@@ -22,7 +22,7 @@ for row in gateway:graphql-gateway:sagas reservation:station-reservation-service
   TRACK=stable REPLICAS=4 TAG=${stable_tag:-$NEW_TAG} envsubst <<<"$TEMPLATE" | k apply -f -
   TRACK=canary REPLICAS=0 TAG=$NEW_TAG envsubst <<<"$TEMPLATE" | k apply -f -
 done
-k wait --for=condition=Available deploy -l track=stable --timeout=300s
+for d in $(k get deploy -l track=stable -o name); do k rollout status "$d" --timeout=300s; done  # old pods gone too
 k get deploy -o wide
 REMOTE
 } | ssm_run "$ENV" 600
