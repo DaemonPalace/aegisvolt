@@ -32,6 +32,11 @@ class Refund(BaseModel):
     fleet_id: str
 
 
+class NewFleet(BaseModel):
+    fleet_id: str = Field(pattern=r"^FLEET-[A-Z0-9-]{2,30}$")
+    initial_cents: int = Field(default=0, ge=0, le=1_000_000)
+
+
 class TopUp(BaseModel):
     fleet_id: str
     amount_cents: int = Field(gt=0, le=1_000_000)
@@ -51,6 +56,36 @@ def txn_key(fleet_id: str, saga_id: str, kind: str) -> dict:
 
 def price(kwh: float, surge: bool) -> int:
     return math.ceil(Decimal(str(kwh)) * RATE_CENTS_PER_KWH * (SURGE if surge else 1))
+
+
+@app.get("/pricing")
+def pricing():
+    # The UI quotes price(kwh, surge) from these, so the rate lives only here.
+    return {"rate_cents_per_kwh": RATE_CENTS_PER_KWH, "surge_multiplier": float(SURGE),
+            "surge": ddb.flag("ENABLE_DYNAMIC_SURGE_PRICING")}
+
+
+@app.get("/wallets")
+def wallets():
+    # ponytail: Scan for the WALLET rows; a GSI on sk if fleets reach the thousands.
+    items = ddb.plain(ddb.table(TABLE).scan(FilterExpression="sk = :w", ExpressionAttributeValues={":w": "WALLET"})["Items"])
+    return sorted(({"fleet_id": i["pk"].removeprefix("FLEET#"), "balance_cents": i["balance_cents"]} for i in items),
+                  key=lambda f: f["fleet_id"])
+
+
+@app.post("/wallets")
+def create_wallet(body: NewFleet):
+    try:
+        ddb.table(TABLE).put_item(Item={**wallet_key(body.fleet_id), "balance_cents": 0},
+                                  ConditionExpression="attribute_not_exists(pk)")
+    except ClientError as exc:
+        if exc.response["Error"]["Code"] == "ConditionalCheckFailedException":
+            raise HTTPException(409, "FLEET_EXISTS")
+        raise
+    event("billing.fleet_created", f"{body.fleet_id} created")
+    if body.initial_cents:
+        return topup(TopUp(fleet_id=body.fleet_id, amount_cents=body.initial_cents))  # recorded as a deposit
+    return wallet(body.fleet_id)
 
 
 @app.get("/wallets/{fleet_id}")

@@ -3,7 +3,7 @@ Taller-PatronSaga scripts/simulate.py). Each asserts final status, compensation 
 import uuid
 
 import pytest
-from conftest import connector, start, stop, wait, wallet
+from conftest import connector, lifecycle, start, stop, wait, wallet
 
 
 def compensations(saga: dict) -> list[str]:
@@ -36,6 +36,10 @@ def test_scenario(flag, name, fleet, station, cid, kwh, flags, status, undo):
         assert stop(saga["id"])["status"] == "STOPPED"
     else:
         assert after["balanceCents"] == before  # charge refunded, or never taken
+    if "SIMULATE_CHARGER_HARDWARE_FAULT" in flags:  # the faulty charger stays closed until the owner reopens it
+        assert connector(station, cid)["status"] == "OUT_OF_SERVICE"
+        for action in ("maintenance", "reopen"):
+            lifecycle(station, cid, action)
     assert connector(station, cid)["status"] == "AVAILABLE"
     if "charge" in undo:
         kinds = {t["kind"] for t in after["transactions"] if t["sagaId"] == saga["id"]}

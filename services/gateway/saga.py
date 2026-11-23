@@ -3,7 +3,7 @@
 Plain-async port of wandersync services/orders-billing/saga.py with the Prefect decorators removed:
 charging never depends on Prefect. The step trail lives in the sagas table (UI + Prefect audit read it).
 
-Forward:      reserve → charge → activate → COMPLETED
+Forward:      reserve → charge → activate → COMPLETED (charging) → FINISHED at ends_at (auto stop + release)
 Compensation: completed steps in reverse (plus the failed one on timeout) → COMPENSATED
 """
 import asyncio
@@ -29,7 +29,7 @@ URL = {
 }
 COMPENSATION_BACKOFF = [1, 2, 4, 8, 16]  # ADR-06: 5 retries, then COMPENSATION_FAILED
 RECOVER_AFTER = timedelta(seconds=60)
-TERMINAL = {"COMPLETED", "FAILED", "COMPENSATED", "COMPENSATION_FAILED", "STOPPED"}
+TERMINAL = {"COMPLETED", "FAILED", "COMPENSATED", "COMPENSATION_FAILED", "STOPPED", "FINISHED"}
 
 # (step, service, forward path, compensation path)
 STEPS = [
@@ -130,7 +130,8 @@ async def record(saga: dict, name: str, status: str, detail: str) -> None:
 
 def body(saga: dict) -> dict:
     # Every participant takes the fields it needs from the same body (pydantic ignores the rest).
-    return {k: saga[k] for k in ("fleet_id", "station_id", "connector_id", "kwh")} | {"saga_id": saga["id"]}
+    extra = {"power_kw": saga["power_kw"]} if saga.get("power_kw") else {}
+    return {k: saga[k] for k in ("fleet_id", "station_id", "connector_id", "kwh")} | {"saga_id": saga["id"]} | extra
 
 
 # ───────────────────────── orchestration ─────────────────────────
@@ -148,10 +149,14 @@ async def start(fleet_id: str, station_id: str, connector_id: str, kwh: float,
         if exc.response["Error"]["Code"] != "ConditionalCheckFailedException":
             raise
         return await load(saga["id"])  # same idempotencyKey: return the existing saga, start nothing
-    task = asyncio.create_task(run(copy.deepcopy(saga)))
+    spawn(run(copy.deepcopy(saga)))
+    return saga
+
+
+def spawn(coro) -> None:
+    task = asyncio.create_task(coro)
     _running.add(task)
     task.add_done_callback(_running.discard)
-    return saga
 
 
 async def run(saga: dict) -> str:
@@ -168,19 +173,27 @@ async def run(saga: dict) -> str:
                 await record(saga, name, "FAILED", str(exc))
                 event("saga.step.failed", f"{name}: {exc}", logging.WARNING, step=name)
                 undo = ([step] if isinstance(exc, StepTimeout) else []) + done[::-1]
+                if "CHARGER_HARDWARE_FAULT" in str(exc):
+                    saga["fault"] = True
                 if not undo:
                     saga["status"] = "FAILED"
                     await save(saga)
                     return saga["status"]
                 return await compensate(saga, undo)
+            if name == "reserve":
+                saga["power_kw"] = result.get("power_kw")
             if name == "charge":
                 saga["amount_cents"] = result["amount_cents"]
+            if name == "activate":
+                saga["ends_at"] = result.get("ends_at")
             await record(saga, name, "OK", str(result))
             event("saga.step.ok", f"{name} ok", step=name)
             done.append(step)
         saga["status"] = "COMPLETED"
         await save(saga)
-        event("saga.completed", "charging session active")
+        event("saga.completed", f"charging session active until {saga.get('ends_at')}")
+        if saga.get("ends_at"):
+            spawn(finish(saga["id"], saga["ends_at"]))
         return saga["status"]
     except Exception as exc:  # DynamoDB down etc.: stays STARTED, startup recovery compensates it
         event("saga.crashed", f"{type(exc).__name__}: {exc}", logging.ERROR)
@@ -198,6 +211,15 @@ async def compensate(saga: dict, steps: list[tuple]) -> str:
         except httpx.HTTPError as exc:
             ok = False
             await record(saga, name, "FAILED", f"{path} gave up: {exc!r}")
+    if ok and saga.get("fault"):
+        # The SAGA is already undone (connector AVAILABLE, wallet refunded). This is not a compensation but the
+        # station-owner rule on top: a charger that reported a hardware fault stays closed until maintenance.
+        try:
+            result = await compensating("reservation", "/connectors/lifecycle",
+                                        {**body(saga), "action": "fault", "note": "hardware fault during activation"})
+            await record(saga, "fault", "OK", str(result))
+        except httpx.HTTPError as exc:
+            await record(saga, "fault", "FAILED", f"could not close the connector: {exc!r}")
     saga["status"] = "COMPENSATED" if ok else "COMPENSATION_FAILED"
     await save(saga)
     if ok:
@@ -207,7 +229,18 @@ async def compensate(saga: dict, steps: list[tuple]) -> str:
     return saga["status"]
 
 
-async def stop(saga_id: str) -> dict:
+async def finish(saga_id: str, ends_at: str) -> None:
+    """The charger reached the requested kWh: same close-out as a manual stop, ending FINISHED."""
+    await asyncio.sleep(max(0.0, (datetime.fromisoformat(ends_at) - datetime.now(UTC)).total_seconds()))
+    try:
+        await stop(saga_id, final="FINISHED")
+    except ValueError:
+        pass  # stopped by hand first: nothing left to finish
+
+
+async def stop(saga_id: str, final: str = "STOPPED") -> dict:
+    # ponytail: load-then-save, no status condition; two gateway replicas finishing the same saga at once
+    # repeat the (idempotent) stop + release calls. Conditional update on status if replicas multiply.
     saga = await load(saga_id)
     if not saga:
         raise ValueError("SAGA_NOT_FOUND")
@@ -217,9 +250,9 @@ async def stop(saga_id: str) -> dict:
     for name, service, path in (("stop", "dispatch", "/stop"), ("release", "reservation", "/release")):
         result = await compensating(service, path, body(saga))
         await record(saga, name, "OK", str(result))
-    saga["status"] = "STOPPED"
+    saga["status"] = final
     await save(saga)
-    event("saga.stopped", "charging session stopped")
+    event("saga.finished" if final == "FINISHED" else "saga.stopped", f"charging session {final.lower()}")
     return saga
 
 
@@ -234,3 +267,8 @@ async def recover() -> None:
         correlation_id.set(saga["id"])
         event("saga.recovering", "STARTED for over 60 s: orchestrator died mid-saga", logging.WARNING)
         await compensate(saga, STEPS[::-1])
+    # A restart drops the in-memory finish timers: re-arm them for sessions still charging.
+    charging = await asyncio.to_thread(
+        lambda: _table().scan(FilterExpression=Attr("status").eq("COMPLETED") & Attr("ends_at").exists())["Items"])
+    for item in charging:
+        spawn(finish(item["id"], item["ends_at"]))

@@ -22,7 +22,9 @@ export function outcome(s: Saga, short = false): string {
     case "COMPLETED":
       return `Charging on ${where}: ${s.kwh} kWh, ${money(s.amountCents)} debited.`;
     case "STOPPED":
-      return `Charged ${s.kwh} kWh on ${where} for ${money(s.amountCents)}, then stopped.`;
+      return `Stopped by hand on ${where}; ${money(s.amountCents)} was paid for ${s.kwh} kWh.`;
+    case "FINISHED":
+      return `Charged ${s.kwh} kWh on ${where} for ${money(s.amountCents)}; connector released.`;
     case "FAILED":
       return `Rejected on ${where} at ${failed?.name ?? "the first step"}; nothing had to be undone.`;
     case "COMPENSATED":
@@ -36,7 +38,8 @@ export function outcome(s: Saga, short = false): string {
 function shortOutcome(s: Saga, failed: string | undefined, undone: string[]): string {
   if (s.status === "STARTED") return "In progress";
   if (s.status === "COMPLETED") return "Energy flowing";
-  if (s.status === "STOPPED") return "Charged, then stopped";
+  if (s.status === "STOPPED") return "Stopped by hand";
+  if (s.status === "FINISHED") return "Charged in full";
   if (s.status === "FAILED") return `Rejected at ${failed ?? "first step"}`;
   if (s.status === "COMPENSATED") return `${cap(failed ?? "a step")} failed; ${undone.join(", ")}`;
   return `${cap(failed ?? "a step")} failed; compensation incomplete`;
@@ -84,7 +87,7 @@ export function SagaTrack({ saga, big }: { saga: Saga; big?: boolean }) {
           })}
         </div>
       )}
-      {stop && <p className="none">Stopped at {clock(stop.at)}; connector released.</p>}
+      {stop && <p className="none">{saga.status === "FINISHED" ? "Charge complete" : "Stopped"} at {clock(stop.at)}; connector released.</p>}
     </div>
   );
 }
